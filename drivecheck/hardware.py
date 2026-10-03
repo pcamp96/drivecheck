@@ -22,13 +22,14 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from drivecheck.erase import RecoveryJournal, parse_hdparm_security
 from drivecheck.raid import RaidInspector, RaidOwnership
 
-Progress = Callable[[int, str], Awaitable[None]]
+Progress = Callable[[float, str], Awaitable[None]]
 
 
 class SafetyError(RuntimeError):
@@ -257,6 +258,7 @@ class Hardware:
         self._self_test_drive: Drive | None = None
         self.self_test_poll_seconds = 30.0
         self.self_test_timeout_seconds = 48 * 60 * 60.0
+        self.short_self_test_timeout_cap_seconds = 30 * 60.0
         self.io_safety_poll_seconds = 3.0
         self.demo_step_seconds = 0.0
         self.firmware_erase_active = False
@@ -715,13 +717,28 @@ class Hardware:
         return [message for bit, message in enumerate(messages) if status & (1 << bit)]
 
     async def self_test(self, drive: Drive, progress: Progress) -> dict[str, Any]:
+        """Run the drive's extended SMART self-test."""
+
+        return await self._run_self_test(drive, progress, test_type="long")
+
+    async def short_self_test(self, drive: Drive, progress: Progress) -> dict[str, Any]:
+        """Run the drive's short SMART self-test without changing the long-test API."""
+
+        return await self._run_self_test(drive, progress, test_type="short")
+
+    async def _run_self_test(
+        self, drive: Drive, progress: Progress, *, test_type: str
+    ) -> dict[str, Any]:
+        if test_type not in {"short", "long"}:
+            raise ValueError("SMART self-test type must be short or long")
+        label = "Short" if test_type == "short" else "Extended"
         current = await self.validate(drive)
         if self.demo:
             for percent in (0, 18, 52, 81, 100):
-                await progress(percent, "Extended SMART self-test")
+                await progress(percent, f"{label} SMART self-test")
                 await asyncio.sleep(self.demo_step_seconds)
             raw = self._demo_smart()
-            return {"status": "passed", "detail": "Extended self-test completed", "raw": raw}
+            return {"status": "passed", "detail": f"{label} self-test completed", "raw": raw}
         self._cancel_requested = False
         self._self_test_drive = current
         try:
@@ -738,20 +755,24 @@ class Hardware:
                     "detail": "A SMART self-test was already running; it was not adopted",
                     "raw": initial["raw"],
                 }
-            initial_entry = self._latest_self_test(initial["raw"])
+            initial_log = self._self_test_log_fingerprint(initial["raw"])
             started = await self._runner.run(
-                "smartctl", "-t", "long", self._smart_path(current), timeout=45
+                "smartctl", "-t", test_type, self._smart_path(current), timeout=45
             )
             combined = f"{started.stdout}\n{started.stderr}".lower()
             if started.returncode & 0b00000111 or "unsupported" in combined:
                 return {
                     "status": "unsupported",
-                    "detail": "Extended self-test is unsupported",
+                    "detail": f"{label} self-test is unsupported",
                     "raw": {},
                 }
-            await progress(0, "Extended SMART self-test started")
-            deadline = time.monotonic() + self.self_test_timeout_seconds
-            observed_running = False
+            await progress(0, f"{label} SMART self-test started")
+            if test_type == "short":
+                durations = self.self_test_recommended_seconds(initial["raw"])
+                timeout_seconds = self._short_self_test_timeout(durations["short"])
+            else:
+                timeout_seconds = self.self_test_timeout_seconds
+            deadline = time.monotonic() + timeout_seconds
             while True:
                 if self._cancel_requested:
                     raise asyncio.CancelledError
@@ -760,7 +781,7 @@ class Hardware:
                     await self._abort_self_test(current)
                     return {
                         "status": "incomplete",
-                        "detail": "Extended self-test exceeded the 48 hour safety limit",
+                        "detail": f"{label} self-test exceeded its safety time limit",
                         "raw": {},
                     }
                 await asyncio.sleep(min(self.self_test_poll_seconds, remaining_time))
@@ -768,7 +789,7 @@ class Hardware:
                     await self._abort_self_test(current)
                     return {
                         "status": "incomplete",
-                        "detail": "Extended self-test exceeded the 48 hour safety limit",
+                        "detail": f"{label} self-test exceeded its safety time limit",
                         "raw": {},
                     }
                 current = await self.validate(current)
@@ -776,14 +797,23 @@ class Hardware:
                 raw = snapshot["raw"]
                 remaining = self._remaining_percent(raw)
                 if remaining is not None and remaining > 0:
-                    observed_running = True
-                    await progress(max(1, 100 - remaining), "Extended SMART self-test running")
+                    await progress(
+                        max(0, 100 - remaining),
+                        self._self_test_poll_detail(label, remaining),
+                    )
                     continue
-                latest_entry = self._latest_self_test(raw)
-                if latest_entry is None or (latest_entry == initial_entry and not observed_running):
+                if self._self_test_in_progress(raw):
+                    await progress(0, self._self_test_poll_detail(label, None))
+                    continue
+                latest_log = self._self_test_log_fingerprint(raw)
+                if latest_log is None or latest_log == initial_log:
                     # Some bridges omit execution status.  Never mistake the
                     # previous log's successful entry for the test we started.
-                    await progress(1, "Waiting for a new SMART self-test result")
+                    await progress(
+                        0,
+                        f"Waiting for a new SMART self-test result; "
+                        f"last polled {self._poll_timestamp()}",
+                    )
                     continue
                 outcome, detail = self._self_test_outcome(raw)
                 await progress(100, detail)
@@ -795,6 +825,89 @@ class Hardware:
             raise
         finally:
             self._self_test_drive = None
+
+    async def estimate_info(self, drive: Drive) -> dict[str, Any]:
+        """Read drive-advertised self-test durations without starting a test."""
+
+        current = await self.validate(drive)
+        if self.demo:
+            return {
+                "self_test_seconds": {"short": 120, "long": 450 * 60},
+                "notes": ["Demo durations are synthetic."],
+            }
+        try:
+            result = await self._probe_runner.run(
+                "smartctl", "-a", "-j", self._smart_path(current), timeout=45
+            )
+        except CommandError as exc:
+            return {
+                "self_test_seconds": {"short": None, "long": None},
+                "notes": [f"SMART duration estimate is unavailable: {exc}"],
+            }
+        await self.validate(current)
+        try:
+            raw = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            raw = {}
+        durations = self.self_test_recommended_seconds(raw)
+        notes: list[str] = []
+        status = result.returncode & 0xFF
+        if status & 0b00000111:
+            durations = {"short": None, "long": None}
+            notes.append("SMART duration estimate is unavailable for this drive or bridge.")
+        elif not any(value is not None for value in durations.values()):
+            notes.append("The drive did not report recommended SMART self-test durations.")
+        else:
+            notes.append("Durations are reported by the drive firmware and may vary in practice.")
+        return {"self_test_seconds": durations, "notes": notes}
+
+    @staticmethod
+    def self_test_recommended_seconds(raw: dict[str, Any]) -> dict[str, int | None]:
+        """Extract ATA drive-advertised SMART polling durations from smartctl JSON."""
+
+        if not isinstance(raw, dict):
+            return {"short": None, "long": None}
+        ata = raw.get("ata_smart_data")
+        if not isinstance(ata, dict):
+            ata = {}
+        self_test = ata.get("self_test")
+        if not isinstance(self_test, dict):
+            self_test = {}
+        polling = self_test.get("polling_minutes")
+        if not isinstance(polling, dict):
+            polling = {}
+
+        def seconds(key: str) -> int | None:
+            value = polling.get(key)
+            if isinstance(value, bool):
+                return None
+            try:
+                minutes = int(value)
+            except (TypeError, ValueError):
+                return None
+            return minutes * 60 if minutes > 0 else None
+
+        return {"short": seconds("short"), "long": seconds("extended")}
+
+    def _short_self_test_timeout(self, recommended_seconds: int | None) -> float:
+        """Allow firmware time plus grace, bounded to thirty minutes."""
+
+        if recommended_seconds is None:
+            return self.short_self_test_timeout_cap_seconds
+        with_grace = recommended_seconds + max(120, recommended_seconds // 2)
+        return min(self.short_self_test_timeout_cap_seconds, max(5 * 60, with_grace))
+
+    @staticmethod
+    def _poll_timestamp() -> str:
+        return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    @classmethod
+    def _self_test_poll_detail(cls, label: str, remaining: int | None) -> str:
+        if remaining is None:
+            state = "firmware reports the test is running without a percentage"
+        else:
+            state = f"firmware reports {remaining}% remaining"
+        return f"{label} SMART self-test running; {state}; last polled {cls._poll_timestamp()}"
 
     @staticmethod
     def _remaining_percent(raw: dict[str, Any]) -> int | None:
@@ -814,9 +927,7 @@ class Hardware:
             text = _text(candidate.get("string") or candidate.get("status")).lower()
             match = re.search(r"(\d+)%.*remaining", text)
             if match:
-                return int(match.group(1))
-            if "in progress" in text:
-                return 100
+                return max(0, min(100, int(match.group(1))))
         return None
 
     @classmethod
@@ -824,26 +935,44 @@ class Hardware:
         remaining = cls._remaining_percent(raw)
         if remaining is not None and remaining > 0:
             return True
-        status = raw.get("ata_smart_data", {}).get("self_test", {}).get("status", {})
-        if isinstance(status, dict):
-            text = _text(status.get("string")).lower()
+        candidates = [
+            raw.get("ata_smart_data", {}).get("self_test", {}).get("status", {}),
+            raw.get("scsi_self_test_0", {}),
+        ]
+        for status in candidates:
+            if not isinstance(status, dict):
+                continue
+            text = _text(status.get("string") or status.get("status")).lower()
             if "in progress" in text:
                 return True
+        ata_status = candidates[0]
+        if isinstance(ata_status, dict):
             try:
                 # ATA execution status high nibble 0xF denotes in progress.
-                return int(status.get("value")) >> 4 == 0xF
+                return int(ata_status.get("value")) >> 4 == 0xF
             except (TypeError, ValueError):
                 pass
         return False
 
     @staticmethod
-    def _latest_self_test(raw: dict[str, Any]) -> str | None:
-        tables = raw.get("ata_smart_self_test_log", {}).get("standard", {}).get("table", [])
+    def _self_test_log_fingerprint(raw: dict[str, Any]) -> str | None:
+        if not isinstance(raw, dict):
+            return None
+        ata_log = raw.get("ata_smart_self_test_log")
+        if not isinstance(ata_log, dict):
+            ata_log = {}
+        standard = ata_log.get("standard")
+        if not isinstance(standard, dict):
+            standard = {}
+        tables = standard.get("table")
         if not tables:
-            tables = raw.get("scsi_self_test_log", {}).get("table", [])
+            scsi_log = raw.get("scsi_self_test_log")
+            if not isinstance(scsi_log, dict):
+                scsi_log = {}
+            tables = scsi_log.get("table")
         if not isinstance(tables, list) or not tables:
             return None
-        return json.dumps(tables[0], sort_keys=True, separators=(",", ":"))
+        return json.dumps(tables, sort_keys=True, separators=(",", ":"))
 
     @staticmethod
     def _self_test_outcome(raw: dict[str, Any]) -> tuple[str, str]:
@@ -1466,7 +1595,7 @@ class Hardware:
                 latest_snapshot = snapshot
                 stream_invalid = False
                 percent = self._fio_progress(snapshot, expected_bytes, destructive, benchmark)
-                await progress(min(99, percent), detail)
+                await progress(min(99.99, percent), detail)
 
         await progress(0, detail)
         command_parts = [
@@ -1627,15 +1756,18 @@ class Hardware:
     @staticmethod
     def _fio_progress(
         snapshot: dict[str, Any], expected_bytes: int, destructive: bool, benchmark: bool
-    ) -> int:
+    ) -> float:
         jobs = snapshot.get("jobs") or []
         read_bytes = sum(int(job.get("read", {}).get("io_bytes") or 0) for job in jobs)
         write_bytes = sum(int(job.get("write", {}).get("io_bytes") or 0) for job in jobs)
         if benchmark:
             runtime = max((int(job.get("read", {}).get("runtime") or 0) for job in jobs), default=0)
-            return max(0, min(99, int(runtime / 30_000 * 100)))
+            return round(max(0.0, min(99.99, runtime / 30_000 * 100)), 4)
         denominator = expected_bytes * (2 if destructive else 1)
-        return max(0, min(99, int((read_bytes + write_bytes) / denominator * 100)))
+        if denominator <= 0:
+            return 0.0
+        measured = (read_bytes + write_bytes) / denominator * 100
+        return round(max(0.0, min(99.99, measured)), 4)
 
     async def cancel(self) -> None:
         self._cancel_requested = True

@@ -265,6 +265,13 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
         await engine().scan()
         return engine().state()
 
+    @app.get("/api/drives/{drive_id}/test-estimate", dependencies=[Depends(authenticated)])
+    async def test_estimate(drive_id: str, profile: Literal["quick", "extended"] = "extended"):
+        try:
+            return await engine().test_estimate(drive_id, profile)
+        except (ValueError, SafetyError) as error:
+            raise HTTPException(409, str(error)) from None
+
     @app.get("/api/drives/{drive_id}/erase-plan", dependencies=[Depends(authenticated)])
     async def erase_plan(drive_id: str):
         try:

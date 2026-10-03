@@ -10,7 +10,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 
-from drivecheck import notifications
+from drivecheck import notifications, timing
 from drivecheck.access import AccessLinks
 from drivecheck.config import Config, Settings
 from drivecheck.hardware import Drive, SafetyError, get_hardware
@@ -123,6 +123,9 @@ class Engine:
 
     def state(self) -> dict:
         runs = self.store.runs()
+        for run in runs:
+            if run.get("task"):
+                run["timing"] = timing.live_timing(run)
         public_settings = self.settings.public()
         if getattr(self.config, "headless", False):
             public_settings["auto_test"] = True
@@ -310,6 +313,45 @@ class Engine:
                     "arrays": [],
                     "detail": "An interrupted firmware erase needs operator recovery. Do not power off the drive or start another job.",
                 }
+
+    def _read_sample(self, identity: str) -> float | None:
+        for previous in self.store.runs():
+            if previous.get("drive", {}).get("identity") != identity:
+                continue
+            result = previous.get("results", {}).get("benchmark", {})
+            speed = timing.positive(result.get("read_mbps"))
+            if result.get("status") == "passed" and speed:
+                return speed
+        return None
+
+    async def test_estimate(self, drive_id: str, profile: str = "extended") -> dict:
+        if profile not in {"quick", "extended", "verify"}:
+            raise ValueError("Choose a read-only test estimate")
+        drive = next((item for item in self.drives if item.id == drive_id), None)
+        if drive is None or self._recovery_pending(drive):
+            raise ValueError("Drive is missing or requires firmware recovery")
+        info = await self.hardware.estimate_info(drive)
+        return timing.build_estimate(drive, profile, info, self._read_sample(drive.identity))
+
+    def _refresh_test_estimate(self, run: dict) -> None:
+        if run["profile"] in ERASE_PROFILES:
+            return
+        raw = run.get("results", {}).get("smart_before", {}).get("raw", {})
+        durations = self.hardware.self_test_recommended_seconds(raw)
+        if not any(value is not None for value in durations.values()):
+            previous = next(
+                (p for p in run.get("estimate", {}).get("phases", []) if p["phase"] == "self_test"),
+                {},
+            )
+            durations["short" if run["profile"] == "quick" else "long"] = previous.get("seconds")
+        info = {"self_test_seconds": durations, "notes": []}
+        speed = timing.positive(run.get("results", {}).get("benchmark", {}).get("read_mbps"))
+        run["estimate"] = timing.build_estimate(
+            Drive(**run["drive"]),
+            run["profile"],
+            info,
+            speed or self._read_sample(run["drive"]["identity"]),
+        )
 
     async def erase_plan(self, drive_id: str) -> dict:
         drive = next((item for item in self.drives if item.id == drive_id), None)
@@ -552,6 +594,9 @@ class Engine:
         drive = await self.hardware.validate(
             drive, destructive=profile == "verify" or profile in ERASE_PROFILES
         )
+        estimate = None
+        if profile not in ERASE_PROFILES:
+            estimate = await self.test_estimate(drive.id, profile)
         if self.stopping:
             raise ValueError("The station is stopping")
         if erase_intent is not None and (
@@ -583,6 +628,9 @@ class Engine:
                 "eject_detail": "",
             },
         }
+        run["steps"] = timing.steps_for(profile)
+        if estimate is not None:
+            run["estimate"] = estimate
         if profile in ERASE_PROFILES:
             run["erase_method"] = expected_method
         self.store.save(run)
@@ -595,6 +643,8 @@ class Engine:
         return run
 
     def record(self, run: dict, message: str | None = None):
+        if run.get("task"):
+            run["timing"] = timing.live_timing(run)
         if message:
             run["logs"].append({"time": now(), "message": message})
             run["logs"] = run["logs"][-300:]
@@ -842,11 +892,8 @@ class Engine:
         self.record(run, "Test started")
         if self.settings.value["notifications"]["notify_started"]:
             self.notice(run, "started")
-        steps = ["smart_before", "benchmark", "smart_after"]
-        if run["profile"] in ERASE_PROFILES:
-            steps = ["erase"]
-        elif run["profile"] != "quick":
-            steps = ["smart_before", "self_test", "benchmark", "surface", "smart_after"]
+        steps = run.get("steps") or timing.steps_for(run["profile"])
+        run["steps"] = steps
         cancelled = False
         try:
             for index, phase in enumerate(steps):
@@ -860,6 +907,13 @@ class Engine:
                     progress=round(index / len(steps) * 100, 1),
                     detail=phase.replace("_", " ").capitalize(),
                 )
+                run["task"] = {
+                    "phase": phase,
+                    "progress_percent": 0,
+                    "started_at": now(),
+                    "last_update_at": now(),
+                    "detail": run["detail"],
+                }
                 self.record(run, run["detail"])
 
                 async def progress(percent: float, detail: str, index=index):
@@ -867,6 +921,14 @@ class Engine:
                         progress=round(
                             (index + max(0, min(100, percent)) / 100) / len(steps) * 100, 1
                         ),
+                        detail=detail,
+                    )
+                    unknown = (
+                        "without a percentage" in detail or "Waiting for a new SMART" in detail
+                    )
+                    run["task"].update(
+                        progress_percent=None if unknown else round(max(0, min(100, percent)), 4),
+                        last_update_at=now(),
                         detail=detail,
                     )
                     self.record(run)
@@ -884,7 +946,11 @@ class Engine:
                 elif phase.startswith("smart"):
                     result = await self.hardware.smart(drive)
                 elif phase == "self_test":
-                    result = await self.hardware.self_test(drive, progress)
+                    result = await (
+                        self.hardware.short_self_test(drive, progress)
+                        if run["profile"] == "quick"
+                        else self.hardware.self_test(drive, progress)
+                    )
                 elif phase == "benchmark":
                     result = await self.hardware.benchmark(drive, progress)
                 else:
@@ -892,6 +958,12 @@ class Engine:
                         drive, progress, destructive=run["profile"] == "verify"
                     )
                 run["results"][phase] = result
+                run["task"].update(
+                    progress_percent=100,
+                    last_update_at=now(),
+                    detail=result.get("detail", run["detail"]),
+                )
+                self._refresh_test_estimate(run)
                 self.record(
                     run,
                     f"{phase.replace('_', ' ')}: {result.get('status', result.get('health', 'incomplete'))}",
@@ -1133,6 +1205,27 @@ class Engine:
         )
         message = notifications.run_message(run, self.config.demo)
         if can_wait:
+            raw = run.get("results", {}).get("smart_before", {}).get("raw", {})
+            info = {
+                "self_test_seconds": self.hardware.self_test_recommended_seconds(raw),
+                "notes": [],
+            }
+            extended_estimate = timing.build_estimate(
+                drive,
+                "extended",
+                info,
+                run.get("results", {}).get("benchmark", {}).get("read_mbps"),
+            )
+            run["extended_estimate"] = extended_estimate
+            message += "\nExtended estimate: " + timing.duration(extended_estimate["total_seconds"])
+            if extended_estimate["estimated_finish_at"]:
+                message += " (self-test + benchmark + full read scan; approximate)."
+            else:
+                message += (
+                    "; known/provisional stages are estimated at about "
+                    + timing.duration(extended_estimate["minimum_seconds"])
+                    + "."
+                )
             message += f"\nQuick is a brief screen, not a full surface test. You have {delay} seconds to choose Run Extended or Eject now. No choice: automatic eject."
         notice_id = self.notice(run, "finished", message)
         try:

@@ -403,3 +403,17 @@ def test_erase_routes_require_authentication_and_method_bound_serial_confirmatio
             ).status_code
             == 422
         )
+
+
+def test_estimate_api_is_authenticated_read_only_and_profile_checked(tmp_path):
+    application = app(tmp_path)
+    with TestClient(application) as client:
+        drive = client.get("/api/state", headers=AUTH).json()["drives"][0]
+        path = f"/api/drives/{drive['id']}/test-estimate"
+        assert client.get(path).status_code == 401
+        assert client.get(path + "?profile=full_erase", headers=AUTH).status_code == 422
+        response = client.get(path + "?profile=extended", headers=AUTH)
+        assert response.status_code == 200
+        assert response.json()["total_seconds"] > 0
+        assert client.get("/api/state", headers=AUTH).json()["runs"] == []
+        assert client.get("/api/drives/missing/test-estimate", headers=AUTH).status_code == 409

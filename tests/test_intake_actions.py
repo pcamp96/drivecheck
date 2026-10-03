@@ -57,7 +57,7 @@ async def test_quick_times_out_and_ejects_without_extended_or_writes(tmp_path):
         await asyncio.wait_for(engine.queue.join(), 1)
         run = store.runs()[0]
         assert run["profile"] == "quick" and run["automatic"]
-        assert set(run["results"]) == {"smart_before", "benchmark", "smart_after"}
+        assert set(run["results"]) == {"smart_before", "self_test", "benchmark", "smart_after"}
         assert hardware.self_tests == 0 and hardware.ejected == 1
         assert run["workflow_status"] == "complete"
         with pytest.raises(ValueError, match="expired"):

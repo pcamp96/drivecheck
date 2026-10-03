@@ -362,6 +362,297 @@ async def test_self_test_polls_to_terminal_failure(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
+async def test_short_self_test_uses_firmware_short_command_and_reported_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = Hardware(demo=False)
+    previous = {
+        "smart_status": {"passed": True},
+        "ata_smart_data": {"self_test": {"polling_minutes": {"short": 2}}},
+        "ata_smart_self_test_log": {
+            "standard": {"table": [{"status": {"string": "Completed without error"}, "n": 1}]}
+        },
+    }
+    running = {
+        **previous,
+        "ata_smart_data": {
+            "self_test": {
+                "polling_minutes": {"short": 2},
+                "status": {"remaining_percent": 60},
+            }
+        },
+    }
+    completed = {
+        **previous,
+        "ata_smart_self_test_log": {
+            "standard": {"table": [{"status": {"string": "Completed without error"}, "n": 2}]}
+        },
+    }
+    discovery(hardware, *(lsblk(disk()) for _ in range(7)))
+    operation = FakeRunner(
+        [
+            result(("smartctl",), previous),
+            CommandResult(("smartctl",), 0, "started", ""),
+            result(("smartctl",), running),
+            result(("smartctl",), completed),
+        ]
+    )
+    hardware._runner = operation
+    hardware.self_test_poll_seconds = 0
+    monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
+    drive = (await hardware.discover())[0]
+    updates: list[tuple[int, str]] = []
+
+    async def progress(percent: int, detail: str) -> None:
+        updates.append((percent, detail))
+
+    report = await hardware.short_self_test(drive, progress)
+
+    assert report["status"] == "passed"
+    assert any(call[1:3] == ("-t", "short") for call in operation.calls)
+    assert not any(call[1:3] == ("-t", "long") for call in operation.calls)
+    assert any(
+        percent == 40 and "60% remaining" in detail and "last polled" in detail
+        for percent, detail in updates
+    )
+
+
+@pytest.mark.asyncio
+async def test_long_self_test_keeps_long_smartctl_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    hardware = Hardware(demo=False)
+    initial = {"smart_status": {"passed": True}}
+    discovery(hardware, *(lsblk(disk()) for _ in range(4)))
+    operation = FakeRunner(
+        [
+            result(("smartctl",), initial),
+            CommandResult(("smartctl",), 1, "unsupported", ""),
+        ]
+    )
+    hardware._runner = operation
+    monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
+    drive = (await hardware.discover())[0]
+
+    async def progress(_: int, __: str) -> None:
+        pass
+
+    report = await hardware.self_test(drive, progress)
+
+    assert report["status"] == "unsupported"
+    assert any(call[1:3] == ("-t", "long") for call in operation.calls)
+
+
+@pytest.mark.asyncio
+async def test_short_self_test_rejects_stale_identity_during_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = Hardware(demo=False)
+    initial = {"smart_status": {"passed": True}}
+    discovery(
+        hardware,
+        lsblk(disk()),
+        lsblk(disk()),
+        lsblk(disk()),
+        lsblk(disk(serial="REPLACED")),
+    )
+    operation = FakeRunner(
+        [
+            result(("smartctl",), initial),
+            CommandResult(("smartctl",), 0, "started", ""),
+        ]
+    )
+    hardware._runner = operation
+    hardware.self_test_poll_seconds = 0
+    monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
+    drive = (await hardware.discover())[0]
+
+    async def progress(_: int, __: str) -> None:
+        pass
+
+    report = await hardware.short_self_test(drive, progress)
+
+    assert report["status"] == "incomplete"
+    assert "identity" in report["detail"]
+
+
+@pytest.mark.asyncio
+async def test_short_self_test_cancellation_aborts_after_identity_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = Hardware(demo=False)
+    initial = {"smart_status": {"passed": True}}
+    discovery(hardware, *(lsblk(disk()) for _ in range(4)))
+    operation = FakeRunner(
+        [
+            result(("smartctl",), initial),
+            CommandResult(("smartctl",), 0, "started", ""),
+            CommandResult(("smartctl",), 0, "aborted", ""),
+        ]
+    )
+    hardware._runner = operation
+    hardware.self_test_poll_seconds = 60
+    monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
+    drive = (await hardware.discover())[0]
+    started = asyncio.Event()
+
+    async def progress(_: int, detail: str) -> None:
+        if "started" in detail:
+            started.set()
+
+    task = asyncio.create_task(hardware.short_self_test(drive, progress))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert any(call[1:2] == ("-X",) for call in operation.calls)
+
+
+def test_extracts_only_positive_ata_firmware_self_test_durations() -> None:
+    raw = {
+        "ata_smart_data": {
+            "self_test": {"polling_minutes": {"short": 2, "extended": "447", "conveyance": 5}}
+        }
+    }
+    assert Hardware.self_test_recommended_seconds(raw) == {
+        "short": 120,
+        "long": 26_820,
+    }
+    assert Hardware.self_test_recommended_seconds(
+        {"ata_smart_data": {"self_test": {"polling_minutes": {"short": 0, "extended": True}}}}
+    ) == {"short": None, "long": None}
+    assert Hardware.self_test_recommended_seconds({}) == {"short": None, "long": None}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        [],
+        {"ata_smart_data": None},
+        {"ata_smart_data": []},
+        {"ata_smart_data": {"self_test": None}},
+    ],
+)
+def test_self_test_duration_parser_rejects_malformed_nesting(raw: object) -> None:
+    assert Hardware.self_test_recommended_seconds(raw) == {  # type: ignore[arg-type]
+        "short": None,
+        "long": None,
+    }
+
+
+def test_short_self_test_timeout_has_grace_and_thirty_minute_cap() -> None:
+    hardware = Hardware(demo=False)
+    assert hardware._short_self_test_timeout(60) == 300
+    assert hardware._short_self_test_timeout(10 * 60) == 15 * 60
+    assert hardware._short_self_test_timeout(60 * 60) == 30 * 60
+    assert hardware._short_self_test_timeout(None) == 30 * 60
+
+
+def test_scsi_running_status_without_percentage_is_not_invented_progress() -> None:
+    raw = {"scsi_self_test_0": {"status": "Self test in progress"}}
+    assert Hardware._remaining_percent(raw) is None
+    assert Hardware._self_test_in_progress(raw) is True
+
+
+def test_fio_progress_preserves_fractional_progress_for_large_drives() -> None:
+    snapshot = {"jobs": [{"read": {"io_bytes": 400_000_000}}]}
+    assert (
+        Hardware._fio_progress(
+            snapshot,
+            expected_bytes=20_000_000_000_000,
+            destructive=False,
+            benchmark=False,
+        )
+        == 0.002
+    )
+
+
+def test_fio_progress_stays_below_completion_for_status_samples() -> None:
+    complete_surface = {"jobs": [{"read": {"io_bytes": 1_000_000}}]}
+    complete_benchmark = {"jobs": [{"read": {"runtime": 30_000}}]}
+    assert Hardware._fio_progress(complete_surface, 1_000_000, False, False) == 99.99
+    assert Hardware._fio_progress(complete_benchmark, 1_000_000, False, True) == 99.99
+
+
+@pytest.mark.asyncio
+async def test_estimate_info_uses_probe_runner_without_starting_test(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = Hardware(demo=False)
+    raw = {"ata_smart_data": {"self_test": {"polling_minutes": {"short": 2, "extended": 447}}}}
+    discovery(hardware, lsblk(disk()), lsblk(disk()), lsblk(disk()))
+    probe = FakeRunner([result(("smartctl",), raw)])
+    hardware._probe_runner = probe
+    hardware._runner = FakeRunner([])
+    monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
+    drive = (await hardware.discover())[0]
+
+    estimate = await hardware.estimate_info(drive)
+
+    assert estimate["self_test_seconds"] == {"short": 120, "long": 26_820}
+    assert "firmware" in estimate["notes"][0]
+    assert probe.calls == [("smartctl", "-a", "-j", "/dev/sda")]
+
+
+@pytest.mark.asyncio
+async def test_estimate_info_reports_probe_errors_without_starting_test(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = Hardware(demo=False)
+    discovery(hardware, lsblk(disk()), lsblk(disk()))
+
+    class FailingProbe:
+        async def run(self, *args: str, **kwargs: object) -> CommandResult:
+            raise CommandError("probe failed")
+
+    hardware._probe_runner = FailingProbe()  # type: ignore[assignment]
+    hardware._runner = FakeRunner([])
+    monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
+    drive = (await hardware.discover())[0]
+
+    estimate = await hardware.estimate_info(drive)
+
+    assert estimate["self_test_seconds"] == {"short": None, "long": None}
+    assert "probe failed" in estimate["notes"][0]
+
+
+@pytest.mark.asyncio
+async def test_estimate_info_discards_durations_when_smart_probe_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = Hardware(demo=False)
+    raw = {"ata_smart_data": {"self_test": {"polling_minutes": {"short": 2, "extended": 447}}}}
+    discovery(hardware, lsblk(disk()), lsblk(disk()), lsblk(disk()))
+    hardware._probe_runner = FakeRunner([result(("smartctl",), raw, returncode=1)])
+    monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
+    drive = (await hardware.discover())[0]
+
+    estimate = await hardware.estimate_info(drive)
+
+    assert estimate["self_test_seconds"] == {"short": None, "long": None}
+    assert "unavailable" in estimate["notes"][0]
+
+
+@pytest.mark.asyncio
+async def test_estimate_info_revalidates_identity_after_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = Hardware(demo=False)
+    discovery(
+        hardware,
+        lsblk(disk()),
+        lsblk(disk()),
+        lsblk(disk(serial="REPLACED")),
+    )
+    hardware._probe_runner = FakeRunner([result(("smartctl",), {})])
+    monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
+    drive = (await hardware.discover())[0]
+
+    with pytest.raises(SafetyError, match="identity"):
+        await hardware.estimate_info(drive)
+
+
+@pytest.mark.asyncio
 async def test_self_test_does_not_adopt_existing_test(monkeypatch: pytest.MonkeyPatch) -> None:
     hardware = Hardware(demo=False)
     running = {
@@ -384,7 +675,7 @@ async def test_self_test_does_not_adopt_existing_test(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
-async def test_observed_running_test_can_complete_with_identical_log_entry(
+async def test_observed_running_test_waits_for_a_changed_whole_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     hardware = Hardware(demo=False)
@@ -399,23 +690,38 @@ async def test_observed_running_test_can_complete_with_identical_log_entry(
         "ata_smart_data": {"self_test": {"status": {"remaining_percent": 50}}},
         **{key: value for key, value in completed.items() if key != "smart_status"},
     }
-    discovery(hardware, *(lsblk(disk()) for _ in range(7)))
+    new_result = {
+        "smart_status": {"passed": True},
+        "ata_smart_self_test_log": {
+            "standard": {
+                "table": [
+                    {"status": {"string": "Completed without error"}},
+                    {"status": {"string": "Completed without error"}},
+                ]
+            }
+        },
+    }
+    discovery(hardware, *(lsblk(disk()) for _ in range(9)))
     hardware._runner = FakeRunner(
         [
             result(("smartctl",), completed),
             CommandResult(("smartctl",), 0, "started", ""),
             result(("smartctl",), running),
             result(("smartctl",), completed),
+            result(("smartctl",), new_result),
         ]
     )
     hardware.self_test_poll_seconds = 0
     monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
     drive = (await hardware.discover())[0]
 
-    async def progress(_: int, __: str) -> None:
-        pass
+    updates: list[str] = []
+
+    async def progress(_: int, detail: str) -> None:
+        updates.append(detail)
 
     assert (await hardware.self_test(drive, progress))["status"] == "passed"
+    assert any("Waiting for a new" in detail for detail in updates)
 
 
 @pytest.mark.asyncio

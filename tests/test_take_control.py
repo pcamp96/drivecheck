@@ -60,7 +60,12 @@ async def test_explicit_takeover_queues_one_quick_intake_and_respects_busy(tmp_p
             await engine.take_control(drive.id, f"TAKE CONTROL {drive.serial}")
         assert hardware.takeovers == 1
         await asyncio.wait_for(engine.queue.join(), 1)
-        assert set(store.runs()[0]["results"]) == {"smart_before", "benchmark", "smart_after"}
+        assert set(store.runs()[0]["results"]) == {
+            "smart_before",
+            "self_test",
+            "benchmark",
+            "smart_after",
+        }
         assert not any(r["profile"] == "verify" for r in store.runs())
     finally:
         await engine.stop()
