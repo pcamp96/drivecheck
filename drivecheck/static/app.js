@@ -380,7 +380,7 @@ function selfTestRecords(raw) {
     const row = objectValue(entry);
     const status = displayValue(row.status) || displayValue(row.self_test_result) || displayValue(row.result) || "Result not reported";
     const type = displayValue(row.type) || displayValue(row.self_test_code) || displayValue(row.test_type);
-    const lba = [row.lba_of_first_error, row.failing_lba, row.address_of_first_error, row.first_error_lba]
+    const lba = [row.lba, row.lba_of_first_error, row.failing_lba, row.address_of_first_error, row.first_error_lba]
       .map(numericValue).find((value) => value != null && value >= 0);
     const hours = [row.lifetime_hours, row.power_on_hours].map(numericValue).find((value) => value != null);
     return { status: String(status), type: type ? String(type) : "", lba, hours };
@@ -664,10 +664,16 @@ function renderReport(run) {
   const reportTitle = textNode("h3", run.drive?.model || run.drive_id || "Unknown drive");
   reportTitle.tabIndex = -1;
   title.append(reportTitle, textNode("p", `${profileLabel(run.profile)} test · ${run.drive?.serial || "No serial"}`));
-  const download = textNode("a", "Export JSON", "quiet-button");
-  download.href = `/api/runs/${encodeURIComponent(run.id)}/report`;
-  download.setAttribute("download", "");
-  header.append(title, download);
+  const downloads = document.createElement("div");
+  downloads.className = "report-downloads";
+  const readableDownload = textNode("a", "Export readable report", "quiet-button");
+  readableDownload.href = `/api/runs/${encodeURIComponent(run.id)}/report.txt`;
+  readableDownload.setAttribute("download", "");
+  const jsonDownload = textNode("a", "Export JSON", "quiet-button");
+  jsonDownload.href = `/api/runs/${encodeURIComponent(run.id)}/report`;
+  jsonDownload.setAttribute("download", "");
+  downloads.append(readableDownload, jsonDownload);
+  header.append(title, downloads);
   const summary = document.createElement("div");
   summary.className = "report-summary";
   [["Status", statusLabel(run.status)], ["Progress", `${Math.round(Number(run.progress) || 0)}%`], ["Started", formatDate(run.started_at)], ["Finished", formatDate(run.finished_at)]].forEach(([label, value]) => {

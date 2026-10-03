@@ -16,6 +16,10 @@ class Store:
             "CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, message TEXT, "
             "attempts INTEGER DEFAULT 0, due REAL DEFAULT 0, delivered INTEGER DEFAULT 0, error TEXT)"
         )
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(outbox)")}
+        for column in ("attachment_name", "attachment_text"):
+            if column not in columns:
+                self.db.execute(f"ALTER TABLE outbox ADD COLUMN {column} TEXT")
         self.db.commit()
 
     def save(self, run: dict) -> None:
@@ -68,11 +72,25 @@ class Store:
                 lifecycle["eject_detail"] = "The interrupted test was not automatically released."
                 self.save(run)
 
-    def enqueue_notice(self, notice_id: str, message: str) -> None:
+    def enqueue_notice(self, notice_id: str, message: str, attachment: dict | None = None) -> None:
         self.db.execute(
-            "INSERT OR IGNORE INTO outbox(id,message) VALUES (?,?)", (notice_id, message)
+            "INSERT OR IGNORE INTO outbox(id,message,attachment_name,attachment_text) VALUES (?,?,?,?)",
+            (
+                notice_id,
+                message,
+                (attachment or {}).get("filename"),
+                (attachment or {}).get("text"),
+            ),
         )
         self.db.commit()
+
+    def notice_attachment(self, notice_id: str) -> dict | None:
+        row = self.db.execute(
+            "SELECT attachment_name,attachment_text FROM outbox WHERE id=?", (notice_id,)
+        ).fetchone()
+        if row is None or row[0] is None or row[1] is None:
+            return None
+        return {"filename": row[0], "text": row[1]}
 
     def discard_pending_startup_notices(self) -> None:
         """Remove boot notices that would describe a previous process as newly ready."""

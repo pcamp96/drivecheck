@@ -154,6 +154,14 @@ The dashboard's Settings view uses one vertical form. Automation switches save
 immediately and show success or an error; notification edits use Save settings.
 SMART health and self-test reports explain the outcome and available evidence in
 plain language. Raw JSON remains available under Technical details and Export JSON.
+Export readable report downloads the same UTF-8 text format used for failure
+attachments. Failed-test notifications include the failing step and specific
+reason, such as a surface-read failure and its reported block. Telegram receives
+one document message with that explanation as its caption; Discord receives the
+explanation and text file in one webhook message. The notification outbox stores
+the report snapshot with the message so retries preserve the attachment, including
+across a restart. Notification acceptance is recorded only after the provider
+confirms the attachment. Startup and successful-test messages remain text-only.
 
 Completed reports offer safe eject and read-only retest controls. After Linux
 USB power-off or macOS eject, reconnect the drive or power-cycle its dock first.

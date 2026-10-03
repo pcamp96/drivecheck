@@ -82,7 +82,7 @@ async def test_headless_rejects_malformed_saved_notification_settings(tmp_path):
 async def test_headless_delivers_then_unmounts_ejects_and_sends_ready(tmp_path, monkeypatch):
     delivered = []
 
-    async def send(settings, message, transport=None):
+    async def send(settings, message, transport=None, *, attachment=None):
         delivered.append(message)
 
     monkeypatch.setattr(notifications, "send", send)
@@ -121,7 +121,7 @@ async def test_headless_delivers_then_unmounts_ejects_and_sends_ready(tmp_path, 
 async def test_failed_self_test_still_ejects_and_sends_failed_ready_notice(tmp_path, monkeypatch):
     delivered = []
 
-    async def send(settings, message, transport=None):
+    async def send(settings, message, transport=None, *, attachment=None):
         delivered.append(message)
 
     class FailedHardware(HeadlessHardware):
@@ -318,7 +318,7 @@ async def test_cancelled_headless_test_never_auto_ejects(tmp_path, monkeypatch):
             self.entered.set()
             await asyncio.sleep(100)
 
-    async def send(settings, message, transport=None):
+    async def send(settings, message, transport=None, *, attachment=None):
         return None
 
     monkeypatch.setattr(notifications, "send", send)

@@ -179,6 +179,7 @@ main > section { max-width: 1350px; margin: 0 auto 58px; scroll-margin-top: 28px
 .report-head h3 { margin: 0 0 3px; font-size: 1.25rem; }
 .report-head p { margin: 0; color: var(--slate); }
 .report-head .quiet-button { display: inline-flex; align-items: center; padding: 9px 13px; text-decoration: none; }
+.report-downloads { display: flex; flex-wrap: wrap; align-items: start; justify-content: flex-end; gap: 7px; }
 .report-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0; }
 .report-summary div { padding: 11px; background: var(--chalk); border-radius: 5px; }
 .report-summary span { display: block; color: var(--slate); font-size: 11px; }
@@ -297,7 +298,7 @@ dialog code { padding: 2px 4px; color: #821d14; background: var(--red-soft); bor
   .evidence-grid { grid-template-columns: 1fr; }
   .settings-grid, .run-list { grid-template-columns: 1fr; }
   .report-head { display: block; }
-  .report-head button { margin-top: 13px; }
+  .report-downloads { justify-content: flex-start; margin-top: 13px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

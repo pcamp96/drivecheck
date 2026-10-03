@@ -596,12 +596,36 @@ class Engine:
         settings = self.settings.value["notifications"]
         if settings["enabled"] and settings["provider"] != "none":
             notice_id = f"{run['id']}:{event}"
-            self.store.enqueue_notice(
-                notice_id, message or notifications.run_message(run, self.config.demo)
-            )
+            attachment = None
+            if (event == "finished" and run["status"] == "failed") or event.startswith("report-"):
+                from drivecheck.reports import human_report
+
+                attachment = {
+                    "filename": f"drivecheck-{run['id']}.txt",
+                    "text": human_report(run, demo=self.config.demo),
+                }
+            content = message or notifications.run_message(run, self.config.demo)
+            if attachment is not None:
+                content += "\nReadable report attached."
+            self.store.enqueue_notice(notice_id, content, attachment=attachment)
             self.notice_event.set()
             return notice_id
         return None
+
+    def notify_report(self, run_id: str) -> dict:
+        run = self.store.get(run_id)
+        if run is None:
+            raise ValueError("Test not found")
+        if run["status"] not in TERMINAL or run.get("workflow_status") == "finishing":
+            raise ValueError("Wait for the test and safe release to finish")
+        notice_id = self.notice(run, f"report-{uuid.uuid4().hex}")
+        if notice_id is None:
+            raise ValueError("Enable a notification provider before sending a report")
+        return {
+            "status": "queued",
+            "notice_id": notice_id,
+            "detail": "Readable report queued for delivery.",
+        }
 
     async def _finish_headless(self, run: dict, drive: Drive) -> None:
         lifecycle = run["lifecycle"]
@@ -690,8 +714,11 @@ class Engine:
             if self.settings.value["notifications"]["enabled"]:
                 for notice_id, message, attempts in self.store.pending_notices(time.time()):
                     try:
+                        attachment = self.store.notice_attachment(notice_id)
                         await notifications.send(
-                            copy.deepcopy(self.settings.value["notifications"]), message
+                            copy.deepcopy(self.settings.value["notifications"]),
+                            message,
+                            **({"attachment": attachment} if attachment is not None else {}),
                         )
                         self.store.delivered(notice_id)
                         self._update_notice_lifecycle(notice_id, "sent")

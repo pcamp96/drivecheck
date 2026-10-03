@@ -30,13 +30,13 @@ def failed_report_fixture(drive: dict) -> dict:
         "status": {"string": "Completed: read failure"},
         "type": {"string": "Short offline"},
         "lifetime_hours": 4182,
-        "lba_of_first_error": 604616,
+        "lba": 604616,
     }
     current = {
         "status": {"string": "Completed: read failure"},
         "type": {"string": "Extended offline"},
         "lifetime_hours": 4190,
-        "lba_of_first_error": 622728,
+        "lba": 622728,
     }
     fixture_drive = {
         **drive,
@@ -199,6 +199,15 @@ def main():
                 report = json.loads((ARTIFACTS / "browser-report.json").read_text())
                 assert report["status"] == "passed" and report["simulated"] is True
                 assert len(report["results"]) == 5
+                with page.expect_download() as readable_download_info:
+                    page.get_by_role("link", name="Export readable report", exact=True).click()
+                readable_path = ARTIFACTS / "browser-report.txt"
+                readable_download_info.value.save_as(readable_path)
+                readable = readable_path.read_text(encoding="utf-8")
+                assert "drivecheck" in readable.casefold()
+                assert "passed" in readable.casefold()
+                assert not readable.lstrip().startswith("{")
+                assert '"results":' not in readable
 
                 # Cancellation is exercised through the UI against a real running job.
                 page.get_by_role("button", name="Extended test", exact=True).click()

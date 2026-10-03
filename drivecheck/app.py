@@ -11,7 +11,7 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -271,6 +271,23 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
         if run is None:
             raise HTTPException(404, "Test not found")
         return run
+
+    @app.get("/api/runs/{run_id}/report.txt", dependencies=[Depends(authenticated)])
+    async def readable_report(run_id: str):
+        from drivecheck.reports import human_report
+
+        run = get_run(run_id)
+        return PlainTextResponse(
+            human_report(run, demo=config.demo),
+            headers={"Content-Disposition": f'attachment; filename="drivecheck-{run["id"]}.txt"'},
+        )
+
+    @app.post("/api/runs/{run_id}/notify", dependencies=[Depends(authenticated)])
+    async def send_report(run_id: str):
+        try:
+            return engine().notify_report(run_id)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
 
     @app.get("/api/runs/{run_id}/report", dependencies=[Depends(authenticated)])
     async def report(run_id: str):

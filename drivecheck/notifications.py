@@ -1,5 +1,6 @@
 """Provider adapters. Never include tokens or webhook URLs in error messages."""
 
+import json
 import re
 from urllib.parse import urlsplit
 
@@ -41,36 +42,83 @@ def validate_settings(settings: dict) -> None:
             raise ValueError("Telegram requires both a bot token and chat ID")
 
 
-async def send(settings: dict, message: str, transport=None) -> None:
+async def send(
+    settings: dict, message: str, transport=None, *, attachment: dict | None = None
+) -> None:
     validate_settings(settings)
     if not settings["enabled"] or settings["provider"] == "none":
         raise NotificationError("Notifications are disabled. Save an enabled provider first.")
     provider = settings["provider"]
+    document = None
+    if attachment is not None:
+        filename = attachment.get("filename", "")
+        text = attachment.get("text")
+        if (
+            not isinstance(filename, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]+\.txt", filename)
+            or not isinstance(text, str)
+        ):
+            raise NotificationError("The report attachment is invalid")
+        content = text.encode("utf-8")
+        if len(content) > 1_000_000:
+            raise NotificationError("The readable report exceeds the attachment size limit")
+        document = (filename, content, "text/plain; charset=utf-8")
     try:
         async with httpx.AsyncClient(
             timeout=15, follow_redirects=False, transport=transport, trust_env=False
         ) as client:
             if provider == "discord":
-                response = await client.post(
-                    settings["discord_webhook"],
-                    params={"wait": "true"},
-                    json={"content": message[:1900], "allowed_mentions": {"parse": []}},
-                )
+                payload = {"content": message[:1900], "allowed_mentions": {"parse": []}}
+                if document is not None:
+                    response = await client.post(
+                        settings["discord_webhook"],
+                        params={"wait": "true"},
+                        data={"payload_json": json.dumps(payload)},
+                        files={"files[0]": document},
+                    )
+                else:
+                    response = await client.post(
+                        settings["discord_webhook"],
+                        params={"wait": "true"},
+                        json=payload,
+                    )
             else:
-                response = await client.post(
-                    f"https://api.telegram.org/bot{settings['telegram_token']}/sendMessage",
-                    json={"chat_id": settings["telegram_chat_id"], "text": message[:4000]},
-                )
+                if document is not None:
+                    response = await client.post(
+                        f"https://api.telegram.org/bot{settings['telegram_token']}/sendDocument",
+                        data={"chat_id": settings["telegram_chat_id"], "caption": message[:1000]},
+                        files={"document": document},
+                    )
+                else:
+                    response = await client.post(
+                        f"https://api.telegram.org/bot{settings['telegram_token']}/sendMessage",
+                        json={"chat_id": settings["telegram_chat_id"], "text": message[:4000]},
+                    )
             if response.status_code == 429:
                 raise NotificationError(f"{provider.title()} rate limit reached. Try again later")
             if not 200 <= response.status_code < 300:
                 raise NotificationError(
                     f"{provider.title()} rejected delivery (HTTP {response.status_code}). Check provider credentials and permissions."
                 )
-            if provider == "telegram" and not response.json().get("ok"):
-                raise NotificationError(
-                    "Telegram did not confirm delivery. Check bot access to the chat."
-                )
+            if provider == "telegram":
+                body = response.json()
+                if not isinstance(body, dict) or not body.get("ok"):
+                    raise NotificationError(
+                        "Telegram did not confirm delivery. Check bot access to the chat."
+                    )
+                result = body.get("result")
+                if document is not None and (
+                    not isinstance(result, dict) or not isinstance(result.get("document"), dict)
+                ):
+                    raise NotificationError("Telegram did not confirm the report attachment")
+            elif document is not None:
+                body = response.json()
+                attachments = body.get("attachments", []) if isinstance(body, dict) else []
+                if not isinstance(attachments, list) or not any(
+                    isinstance(item, dict) and item.get("filename") == document[0]
+                    for item in attachments
+                ):
+                    raise NotificationError("Discord did not confirm the report attachment")
     except NotificationError:
         raise
     except (httpx.HTTPError, ValueError):
@@ -80,6 +128,8 @@ async def send(settings: dict, message: str, transport=None) -> None:
 
 
 def run_message(run: dict, demo: bool = False) -> str:
+    from drivecheck.reports import failure_reason
+
     drive = run["drive"]
     benchmark = run["results"].get("benchmark", {})
     speed = benchmark.get("read_mbps")
@@ -88,6 +138,8 @@ def run_message(run: dict, demo: bool = False) -> str:
         f"{drive['model']} | Serial: {drive['serial'] or 'unavailable'}",
         f"Profile: {run['profile']} | {run['detail']}",
     ]
+    if run["status"] == "failed":
+        lines.append(f"Why it failed: {failure_reason(run)}")
     if speed is not None:
         lines.append(f"Sequential read: {speed:.1f} MB/s")
     lifecycle = run.get("lifecycle", {})

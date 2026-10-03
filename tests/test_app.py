@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import time
 
 from fastapi.testclient import TestClient
@@ -150,6 +151,56 @@ def test_report_retest_is_authenticated_and_always_read_only(tmp_path):
         assert response.status_code == 200
         assert response.json()["run"]["profile"] == "extended"
         assert wait_finished(client, response.json()["run"]["id"])["status"] == "passed"
+
+
+def test_readable_report_export_and_explicit_notification_attachment(tmp_path, monkeypatch):
+    captured = []
+
+    async def send(settings, message, transport=None, *, attachment=None):
+        captured.append((message, attachment))
+
+    monkeypatch.setattr("drivecheck.notifications.send", send)
+    application = app(tmp_path, demo_step_seconds=0.001)
+    with TestClient(application) as client:
+        drive = client.get("/api/state", headers=AUTH).json()["drives"][0]
+        run = client.post(
+            "/api/runs", headers=AUTH, json={"drive_id": drive["id"], "profile": "quick"}
+        ).json()
+        wait_finished(client, run["id"])
+        path = f"/api/runs/{run['id']}"
+        assert client.get(path + "/report.txt").status_code == 401
+        response = client.get(path + "/report.txt", headers=AUTH)
+        assert response.status_code == 200 and response.headers["content-type"].startswith(
+            "text/plain"
+        )
+        assert "VERDICT: PASSED" in response.text
+        assert not response.text.startswith("{")
+        assert client.post(path + "/notify", headers=AUTH).status_code == 409
+        client.put(
+            "/api/settings",
+            headers=AUTH,
+            json={
+                "notifications": {
+                    "provider": "telegram",
+                    "enabled": True,
+                    "telegram_token": "123:fake",
+                    "telegram_chat_id": "-987",
+                }
+            },
+        )
+        queued = client.post(path + "/notify", headers=AUTH).json()
+        with sqlite3.connect(tmp_path / "drivecheck.sqlite3") as database:
+            for _ in range(100):
+                delivered = database.execute(
+                    "SELECT delivered FROM outbox WHERE id=?", (queued["notice_id"],)
+                ).fetchone()[0]
+                if delivered:
+                    break
+                time.sleep(0.01)
+            assert delivered
+        assert captured[-1][1]["filename"] == f"drivecheck-{run['id']}.txt"
+        assert "VERDICT: PASSED" in captured[-1][1]["text"]
+        assert "fake" not in captured[-1][1]["text"]
 
 
 def test_auto_read_only_and_login_throttle(tmp_path):
