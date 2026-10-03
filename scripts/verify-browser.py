@@ -112,9 +112,25 @@ def main():
                 page.locator("#telegram-token").fill("123:synthetic_secret")
                 page.locator("#telegram-chat").fill("-987")
                 page.get_by_role("button", name="Save settings", exact=True).click()
-                expect(page.locator("#telegram-configured")).to_have_text("A bot token is saved.")
+                expect(page.locator("#telegram-configured")).to_have_text(
+                    "Telegram credentials saved"
+                )
+                expect(page.locator("#telegram-configured")).to_have_class(
+                    "credential-status is-saved"
+                )
+                expect(page.locator("#telegram-token")).to_have_value("")
+                expect(page.locator("#telegram-token")).to_have_attribute(
+                    "placeholder", "Token saved · leave blank to keep it"
+                )
+                page.reload()
+                expect(page.locator("#telegram-configured")).to_have_text(
+                    "Telegram credentials saved"
+                )
                 page.locator("#forget-telegram").click()
-                expect(page.locator("#telegram-configured")).to_have_text("No bot token saved.")
+                expect(page.locator("#telegram-configured")).to_have_text(
+                    "Telegram credentials not configured"
+                )
+                expect(page.locator("#telegram-configured")).to_have_class("credential-status")
 
                 # Reconnect establishes a fresh snapshot; mobile has no horizontal overflow.
                 page.reload()

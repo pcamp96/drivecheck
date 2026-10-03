@@ -210,6 +210,8 @@ main > section { max-width: 1350px; margin: 0 auto 58px; scroll-margin-top: 28px
 .check-row input { width: 17px; min-height: 17px; }
 .form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 19px; }
 .configured-note, .form-status { margin: 4px 0; color: var(--slate); font-size: 12px; }
+.credential-status { margin: 14px 0 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 5px; color: var(--slate); background: var(--chalk); font-size: 14px; font-weight: 650; }
+.credential-status.is-saved { color: var(--teal); border-color: var(--teal); background: var(--teal-soft); }
 .forget-button { padding: 3px 0; color: var(--red); background: transparent; font-size: 12px; font-weight: 650; }
 .forget-button:hover:not(:disabled) { color: #841b13; background: transparent; text-decoration: underline; }
 

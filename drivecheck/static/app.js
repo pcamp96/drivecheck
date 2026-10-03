@@ -445,7 +445,9 @@ function renderSettings(force = false) {
   elements.discordWebhook.value = "";
   elements.telegramToken.value = "";
   elements.discordConfigured.textContent = notifications.discord_configured ? "A webhook is saved." : "No webhook saved.";
-  elements.telegramConfigured.textContent = notifications.telegram_configured ? "A bot token is saved." : "No bot token saved.";
+  elements.telegramConfigured.textContent = notifications.telegram_configured ? "Telegram credentials saved" : "Telegram credentials not configured";
+  elements.telegramConfigured.classList.toggle("is-saved", Boolean(notifications.telegram_configured));
+  elements.telegramToken.placeholder = notifications.telegram_configured ? "Token saved · leave blank to keep it" : "Enter your Telegram bot token";
   elements.forgetDiscord.hidden = !notifications.discord_configured;
   elements.forgetTelegram.hidden = !notifications.telegram_configured;
   elements.destructiveSetting.textContent = settings.allow_destructive ? "Enabled" : "Disabled";
