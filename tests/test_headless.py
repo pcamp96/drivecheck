@@ -195,6 +195,20 @@ async def test_cancelled_headless_test_never_auto_ejects(tmp_path, monkeypatch):
         store.close()
 
 
+async def test_notifier_external_cancellation_wins_notice_event_race(tmp_path):
+    config, settings, store = configured(tmp_path, headless=False)
+    engine = Engine(config, settings, store, HeadlessHardware())
+    task = asyncio.create_task(engine.notifier())
+    await asyncio.sleep(0)
+    engine.notice_event.set()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(0.5):
+            await task
+    assert task.cancelled()
+    store.close()
+
+
 async def test_auto_tombstone_requires_stable_absence_before_requeue(tmp_path):
     config, settings, store = configured(tmp_path, headless=False)
     settings.value["auto_test"] = True

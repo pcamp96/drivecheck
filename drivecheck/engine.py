@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 
 from drivecheck import notifications
 from drivecheck.config import Config, Settings
-from drivecheck.hardware import Drive, Hardware, SafetyError, get_hardware
+from drivecheck.hardware import Drive, SafetyError, get_hardware
 from drivecheck.storage import Store
 
 TERMINAL = {"passed", "warning", "failed", "incomplete", "cancelled"}
@@ -44,9 +44,7 @@ def verdict(results: dict) -> tuple[str, str]:
 class Engine:
     def __init__(self, config: Config, settings: Settings, store: Store, hardware=None):
         self.config, self.settings, self.store = config, settings, store
-        self.hardware = hardware or (
-            Hardware(demo=True) if config.demo else get_hardware(demo=False)
-        )
+        self.hardware = hardware or get_hardware(config.demo)
         if config.demo:
             self.hardware.demo_step_seconds = config.demo_step_seconds
         self.drives: list[Drive] = []
@@ -613,6 +611,7 @@ class Engine:
                             self._update_notice_lifecycle(notice_id, "failed")
                     self.publish()
             try:
-                await asyncio.wait_for(self.notice_event.wait(), timeout=2)
+                async with asyncio.timeout(2):
+                    await self.notice_event.wait()
             except TimeoutError:
                 pass
