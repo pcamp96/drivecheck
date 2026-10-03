@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from drivecheck.config import DEFAULT_SETTINGS
-from drivecheck.notifications import NotificationError, send
+from drivecheck.notifications import NotificationError, run_message, send, station_ready_message
 
 
 def setting(provider):
@@ -18,6 +18,210 @@ def setting(provider):
         "telegram_token": "123:token_secret",
         "telegram_chat_id": "-987",
     }
+
+
+def sample_run(**updates):
+    run = {
+        "id": "a" * 32,
+        "status": "passed",
+        "profile": "quick",
+        "detail": "Selected checks passed.",
+        "workflow_status": "complete",
+        "drive": {"model": "IronWolf 4 TB", "serial": "ABC123"},
+        "results": {"benchmark": {"status": "passed", "read_mbps": 209.4}},
+        "lifecycle": {"eject_status": "pending"},
+    }
+    run.update(updates)
+    return run
+
+
+def test_started_message_is_short_and_describes_the_actual_profile():
+    message = run_message(sample_run(status="running", profile="extended"), event="started")
+    assert message.splitlines() == [
+        "🔎 Extended test started",
+        "",
+        "IronWolf 4 TB",
+        "Serial: ABC123",
+        "",
+        "Checking: SMART health, extended self-test, read speed, and a full read scan.",
+    ]
+    assert "Run:" not in message and "Selected checks" not in message
+
+
+def test_started_message_labels_partial_duration_as_a_minimum():
+    message = run_message(
+        sample_run(
+            status="running",
+            profile="extended",
+            estimate={"total_seconds": None, "minimum_seconds": 450},
+            timing={"remaining_seconds": 450},
+        ),
+        event="started",
+    )
+    assert "Estimated time: at least 8 min; full timing unavailable." in message
+    assert "Estimated time: about" not in message
+
+
+def test_finished_and_ready_are_distinct_messages():
+    run = sample_run(
+        workflow_status="awaiting_action",
+        lifecycle={"eject_status": "pending", "action_window_seconds": 180},
+        extended_estimate={"total_seconds": 50_400},
+    )
+    finished = run_message(run, event="finished")
+    assert finished.startswith("✅ Quick test passed\n\nIronWolf 4 TB\nSerial: ABC123")
+    assert "Read speed: 209.4 MB/s." in finished
+    assert "Scope: Short SMART test + read sample." in finished
+    assert "Extended estimate: about 14 hr." in finished
+    assert "Choose the next action below. Auto-eject in 3 min." in finished
+    assert "Safe to remove" not in finished
+    assert "Run:" not in finished
+
+    run["lifecycle"] = {"eject_status": "ejected"}
+    ready = run_message(run, event="ready")
+    assert ready.splitlines() == [
+        "🟢 Safe to remove",
+        "",
+        "IronWolf 4 TB",
+        "Serial: ABC123",
+        "",
+        "Previous result: Quick test passed.",
+        "You can unplug this drive now.",
+    ]
+    assert "Read speed" not in ready and "Scope:" not in ready
+
+
+def test_finished_message_labels_partial_extended_estimate_as_a_minimum():
+    run = sample_run(
+        extended_estimate={"total_seconds": None, "minimum_seconds": 50_400},
+    )
+    message = run_message(run, event="finished")
+    assert "Extended estimate: at least 14 hr; full timing unavailable." in message
+    assert "Extended estimate: about" not in message
+
+
+def test_failed_message_uses_bounded_human_reason_without_raw_json():
+    run = sample_run(
+        status="failed",
+        detail='{"json_format_version":[1,0],"unsafe":"raw"}',
+        results={
+            "smart_before": {
+                "status": "failed",
+                "detail": "SMART reports failing health",
+            }
+        },
+    )
+    message = run_message(run, event="finished")
+    assert message.startswith("❌ Quick test failed")
+    assert "Reason: Initial SMART health failed: SMART reports failing health." in message
+    assert "Scope:" not in message
+    assert "json_format_version" not in message and "Run:" not in message
+
+
+def test_release_failure_does_not_claim_drive_is_safe():
+    run = sample_run(
+        lifecycle={
+            "eject_status": "failed",
+            "eject_detail": "The enclosure still reports the device as busy.",
+        }
+    )
+    message = run_message(run, event="release_failed")
+    assert message.startswith("⛔ Eject failed")
+    assert "The quick test passed, but the drive was not released." in message
+    assert "Keep the drive connected" in message
+    assert "Safe to remove" not in message and "unplug" not in message
+
+
+def test_firmware_recovery_and_quick_format_warnings_are_never_hidden():
+    recovery = sample_run(
+        status="incomplete",
+        profile="quick_erase",
+        results={
+            "erase": {
+                "status": "incomplete",
+                "method": "ata_secure_erase",
+                "recovery_required": True,
+            }
+        },
+    )
+    message = run_message(recovery, event="finished")
+    assert message.startswith("⚠️ Firmware erase needs recovery")
+    assert "DO NOT power off or remove this drive." in message
+
+    fallback = sample_run(
+        profile="quick_erase",
+        results={"erase": {"status": "passed", "method": "quick_format_exfat"}},
+    )
+    message = run_message(fallback, event="finished")
+    assert "Method: Quick exFAT format." in message
+    assert "Not a secure erase; old files may be recoverable." in message
+
+
+def test_report_event_renders_result_even_after_eject():
+    run = sample_run(lifecycle={"eject_status": "ejected"})
+    message = run_message(run, event="report-requested")
+    assert message.startswith("✅ Quick test passed")
+    assert "Safe to remove" not in message
+    assert message.endswith("Safe eject: Confirmed.")
+
+
+def test_finished_message_marks_unconfirmed_release_without_claiming_safety():
+    run = sample_run(
+        workflow_status="interrupted",
+        lifecycle={"eject_status": "interrupted"},
+    )
+    message = run_message(run, event="finished")
+    assert "Safe eject was not confirmed." in message
+    assert "Keep the drive connected and check the dashboard." in message
+    assert "Safe to remove" not in message
+
+
+def test_warning_message_includes_the_specific_warning_reason():
+    run = sample_run(
+        status="warning",
+        results={
+            "smart_before": {
+                "status": "warning",
+                "detail": "The drive reports two pending sectors",
+            }
+        },
+    )
+    message = run_message(run, event="finished")
+    assert message.startswith("⚠️ Quick test completed with a warning")
+    assert (
+        "Warning: Initial SMART health was warning: The drive reports two pending sectors."
+        in message
+    )
+
+
+def test_ready_station_message_is_an_invitation_not_a_diagnostic_dump():
+    message = station_ready_message(
+        booted_at="2026-10-03T22:04:41+00:00",
+        platform="linux",
+        mode="hardware",
+        capabilities={"can_test": True, "can_eject": True, "limitations": []},
+        queued=0,
+    )
+    assert message.splitlines() == [
+        "🟢 DriveCheck is ready",
+        "",
+        "Dock a drive to start its read-only Quick test.",
+        "Station: linux.",
+    ]
+    assert "Started:" not in message and "Queue:" not in message
+
+
+def test_ready_station_does_not_promise_automatic_intake_when_disabled():
+    message = station_ready_message(
+        booted_at="2026-10-03T22:04:41+00:00",
+        platform="linux",
+        mode="hardware",
+        capabilities={"can_test": True, "can_eject": True, "limitations": []},
+        queued=0,
+        auto_test=False,
+    )
+    assert "Open the dashboard to start a drive test." in message
+    assert "Dock a drive" not in message
 
 
 async def test_discord_confirmed_delivery_and_mentions_disabled():

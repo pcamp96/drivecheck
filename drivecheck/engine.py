@@ -67,6 +67,7 @@ class Engine:
         self.telegram_error: str | None = None
         self.access_links = AccessLinks(config)
         self.action_waits: dict[str, dict] = {}
+        self.reconnect_contexts: dict[str, dict] = {}
         self.erase_intents: dict[str, dict] = {}
         self.enqueue_lock = asyncio.Lock()
         self.scan_lock = asyncio.Lock()
@@ -239,6 +240,7 @@ class Engine:
             mode="demo" if self.config.demo else "hardware",
             capabilities=self.capabilities,
             queued=self.queue.qsize(),
+            auto_test=self.settings.value["auto_test"] or getattr(self.config, "headless", False),
         )
         self.store.enqueue_notice(self.startup_notice_id, message)
         self._startup_notice_queued = True
@@ -380,23 +382,33 @@ class Engine:
 
     async def begin_erase(self, run_id: str, profile: str, *, chat_id: int, user_id: int) -> dict:
         authority = self._telegram_authority(chat_id, user_id)
-        run = self.store.get(run_id)
+        context = self.reconnect_contexts.get(run_id)
+        if context:
+            self._context_drive(run_id)
+        run = self.store.get(context["run_id"] if context else run_id)
         if profile not in ERASE_PROFILES or not run or not self.config.allow_destructive:
             raise ValueError("Manual erase is disabled or this action is invalid")
         drive = next(
             (item for item in self.drives if item.identity == run["drive"]["identity"]), None
         )
-        if drive is None or drive.path != run["drive"]["path"] or not drive.eligible:
+        expected = context["drive"] if context else run["drive"]
+        if drive is None or drive.path != expected["path"] or not drive.eligible:
             raise ValueError("The original drive is no longer available for erasing")
         plan = (await self.erase_plan(drive.id))["quick" if profile == "quick_erase" else "full"]
         if not plan.get("available"):
             raise ValueError(plan.get("detail", "This erase method is unavailable"))
         if authority != self._telegram_authority(chat_id, user_id):
             raise ValueError("Telegram erase authorization changed")
+        if context:
+            self._context_drive(run_id)
         wait = self.action_waits.get(run_id)
         if run.get("workflow_status") in BUSY_WORKFLOWS and not wait:
             raise ValueError("Wait for the current job and safe release")
-        deadline = min(time.monotonic() + 120, wait["deadline"] if wait else float("inf"))
+        deadline = min(
+            time.monotonic() + 120,
+            wait["deadline"] if wait else float("inf"),
+            context["deadline"] if context else float("inf"),
+        )
         if deadline <= time.monotonic() or (wait and wait["event"].is_set()):
             raise ValueError("The drive's action window has expired")
         # Bound memory and replace the sender's older pending confirmation.
@@ -414,15 +426,22 @@ class Engine:
             "authority": authority,
             "deadline": deadline,
             "waiting_run": run_id if wait else None,
+            "reconnect_context": run_id if context else None,
         }
         phrase = self._erase_phrase(profile, drive.serial)
         seconds = max(0, int(deadline - time.monotonic()))
-        message = f"DriveCheck: confirm {profile.replace('_', ' ')}\n{drive.model} | Serial: {drive.serial} | Capacity: {drive.size_bytes / 1e12:.2f} TB\nMethod: {plan['detail']}\nAll existing data on this drive will be lost."
+        message = (
+            f"⚠️ Confirm {profile.replace('_', ' ')}\n\n"
+            f"{drive.model}\nSerial: {drive.serial}\nCapacity: {drive.size_bytes / 1e12:.2f} TB\n\n"
+            f"Method: {plan['detail']}\nAll data on this drive will be lost."
+        )
         if plan["method"] == "quick_format_exfat":
             message += (
                 "\nQuick format is NOT secure erasure; old file contents may remain recoverable."
             )
-        message += f"\nReply to this message with exactly: {phrase}\nExpires in {seconds} seconds. The automatic eject countdown continues."
+        message += f"\n\nReply with exactly:\n{phrase}\n\nExpires in {seconds} seconds."
+        if wait:
+            message += " The automatic eject countdown continues."
         return {"intent_id": intent_id, "message": message, "expires_in": seconds}
 
     async def confirm_erase(
@@ -472,6 +491,8 @@ class Engine:
                     "The erase method changed or is unavailable. Review a fresh confirmation."
                 )
             if intent is not None:
+                if intent.get("reconnect_context"):
+                    self._context_drive(intent["reconnect_context"])
                 original = intent["drive"]
                 if (
                     intent["deadline"] <= time.monotonic()
@@ -549,6 +570,7 @@ class Engine:
         replacing_run_id: str | None = None,
         expected_method: str | None = None,
         erase_intent: dict | None = None,
+        reconnect_context: str | None = None,
     ) -> dict:
         if self.stopping:
             raise ValueError("The station is stopping")
@@ -604,6 +626,10 @@ class Engine:
             or erase_intent["authority"] != self._telegram_authority(*erase_intent["principal"])
         ):
             raise ValueError("Telegram erase confirmation expired or authorization changed")
+        if reconnect_context:
+            self._context_drive(reconnect_context)
+        if erase_intent and erase_intent.get("reconnect_context"):
+            self._context_drive(erase_intent["reconnect_context"])
         run = {
             "id": uuid.uuid4().hex,
             "drive_id": drive.id,
@@ -634,6 +660,9 @@ class Engine:
         if profile in ERASE_PROFILES:
             run["erase_method"] = expected_method
         self.store.save(run)
+        # Any new job supersedes previously offered Telegram controls, including
+        # jobs queued from the dashboard or automatic discovery.
+        self._forget_reconnect(drive.identity)
         if profile != "verify" and profile not in ERASE_PROFILES:
             # A manual read-only test or retry is also an intake attempt.
             # Record it under the queue lock so discovery cannot race a retry.
@@ -706,6 +735,145 @@ class Engine:
                 }
         queued = await self.enqueue(current.id, "extended")
         return {"status": "queued", "detail": "Read-only extended retest queued.", "run": queued}
+
+    def _forget_reconnect(self, identity: str) -> None:
+        for key, context in list(self.reconnect_contexts.items()):
+            if context["drive"]["identity"] == identity or context["deadline"] <= time.monotonic():
+                self.reconnect_contexts.pop(key, None)
+
+    def _context_drive(self, context_id: str) -> Drive:
+        context = self.reconnect_contexts.get(context_id)
+        if not context or context["deadline"] <= time.monotonic() or self.stopping:
+            self.reconnect_contexts.pop(context_id, None)
+            raise ValueError("These buttons expired or were already used. Tap Reconnect / rescan.")
+        expected = context["drive"]
+        matches = [drive for drive in self.drives if drive.identity == expected["identity"]]
+        if len(matches) != 1:
+            raise ValueError("The drive changed or disconnected. Tap Reconnect / rescan.")
+        drive = matches[0]
+        if (
+            not drive.eligible
+            or self._recovery_pending(drive)
+            or any(getattr(drive, key) != expected[key] for key in ("path", "serial", "size_bytes"))
+        ):
+            raise ValueError(
+                "The drive changed or is not safe for testing. Tap Reconnect / rescan."
+            )
+        return drive
+
+    def _identity_busy(self, identity: str) -> bool:
+        return self.release_in_progress or any(
+            run["drive"]["identity"] == identity
+            and (
+                run["status"] in {"queued", "running"}
+                or run.get("workflow_status") in BUSY_WORKFLOWS
+            )
+            for run in self.store.runs()
+        )
+
+    async def reconnect_run(self, run_id: str) -> dict:
+        """Refresh inventory, never mount filesystems or reset USB controllers."""
+        original = self.store.get(run_id)
+        if not original:
+            raise ValueError("Test not found")
+        if self.stopping:
+            raise ValueError("The station is stopping")
+        await self.scan()
+        identity = original["drive"]["identity"]
+        self._forget_reconnect(identity)
+        identity_lines = (
+            notifications._clean_line(original["drive"].get("model"), limit=100)
+            + "\nSerial: "
+            + notifications._clean_line(original["drive"].get("serial"), limit=100)
+        )
+        markup = self.telegram_markup(f"{run_id}:reconnect")
+        response = {"reply_markup": markup}
+        if self.discovery_error:
+            return {
+                **response,
+                "status": "blocked",
+                "message": "⚠️ Rescan unavailable\n\n" + self.discovery_error,
+            }
+        matches = [drive for drive in self.drives if drive.identity == identity]
+        if self._identity_busy(identity):
+            return {
+                **response,
+                "status": "busy",
+                "message": "🔎 Drive is busy\n\n"
+                + identity_lines
+                + "\n\nTesting or safe eject is already in progress.",
+            }
+        if not matches:
+            return {
+                **response,
+                "status": "needs_reconnect",
+                "message": "🔌 Reconnect the drive\n\n"
+                + identity_lines
+                + "\n\nPower-cycle the dock or reconnect USB, then tap Reconnect / rescan.",
+            }
+        if len(matches) != 1 or not matches[0].eligible or self._recovery_pending(matches[0]):
+            return {
+                **response,
+                "status": "blocked",
+                "message": "⚠️ Drive unavailable for testing\n\n"
+                + identity_lines
+                + "\n\nOpen the dashboard to review mounts, drive ownership, or recovery requirements.",
+            }
+        if not self.capabilities.get("can_test", True):
+            return {
+                **response,
+                "status": "blocked",
+                "message": "⚠️ Drive testing is unavailable on this station. Open the dashboard.",
+            }
+        current = matches[0]
+        await self.hardware.validate(current)
+        estimate = await self.test_estimate(current.id, "extended")
+        async with self.enqueue_lock:
+            # Revalidate the discovered snapshot after the asynchronous estimate.
+            context_id = uuid.uuid4().hex
+            self.reconnect_contexts[context_id] = {
+                "run_id": run_id,
+                "drive": current.to_dict(),
+                "deadline": time.monotonic() + 300,
+            }
+            try:
+                self._context_drive(context_id)
+                if self._identity_busy(identity):
+                    self.reconnect_contexts.pop(context_id, None)
+                    return {
+                        **response,
+                        "status": "busy",
+                        "message": "🔎 Testing or safe eject is already in progress.",
+                    }
+                await self.hardware.validate(current)
+                self._context_drive(context_id)
+                if self.stopping:
+                    raise ValueError("The station is stopping")
+            except BaseException:
+                self.reconnect_contexts.pop(context_id, None)
+                raise
+            if len(self.reconnect_contexts) > 100:
+                self.reconnect_contexts.pop(next(iter(self.reconnect_contexts)))
+            message = (
+                "🔌 Drive connected\n\n"
+                + identity_lines
+                + "\n\nChoose a test below. These buttons expire in 5 minutes."
+            )
+            total = estimate.get("total_seconds")
+            minimum = estimate.get("minimum_seconds")
+            if total:
+                message += "\nExtended estimate: about " + timing.duration(total) + "."
+            elif minimum:
+                message += (
+                    "\nExtended estimate: at least "
+                    + timing.duration(minimum)
+                    + "; full timing unavailable."
+                )
+            return {
+                "status": "ready",
+                "message": message,
+                "reply_markup": self.telegram_markup(f"{context_id}:reconnected"),
+            }
 
     async def take_control(self, drive_id: str, confirmation: str) -> dict:
         if self.stopping:
@@ -836,15 +1004,17 @@ class Engine:
                             self.notice(
                                 completed,
                                 "ready",
-                                notifications.run_message(completed, self.config.demo),
+                                notifications.run_message(
+                                    completed, self.config.demo, event="ready"
+                                ),
                             )
                         else:
                             self.notice(
                                 completed,
                                 "release_failed",
-                                notifications.run_message(completed, self.config.demo)
-                                + "\nWhy eject failed: "
-                                + completed["lifecycle"]["eject_detail"],
+                                notifications.run_message(
+                                    completed, self.config.demo, event="release_failed"
+                                ),
                             )
             finally:
                 self.release_in_progress = False
@@ -1040,7 +1210,7 @@ class Engine:
                     "filename": f"drivecheck-{run['id']}.txt",
                     "text": human_report(run, demo=self.config.demo),
                 }
-            content = message or notifications.run_message(run, self.config.demo)
+            content = message or notifications.run_message(run, self.config.demo, event=event)
             if attachment is not None:
                 content += "\nReadable report attached."
             self.store.enqueue_notice(notice_id, content, attachment=attachment)
@@ -1068,7 +1238,9 @@ class Engine:
         if settings.get("provider") != "telegram":
             return None
         run_id, _, event = notice_id.partition(":")
-        run = self.store.get(run_id)
+        context = self.reconnect_contexts.get(run_id)
+        report_id = context["run_id"] if context else run_id
+        run = self.store.get(report_id)
         rows = []
         chat = str(settings.get("telegram_chat_id", ""))
         sender = str(settings.get("telegram_user_id", ""))
@@ -1078,6 +1250,20 @@ class Engine:
             or (int(chat) < 0 and sender.isdigit() and int(sender) > 0)
         )
         wait = self.action_waits.get(run_id)
+        context_ready = False
+        if context and event == "reconnected" and controls_authorized:
+            try:
+                self._context_drive(run_id)
+                context_ready = not self._identity_busy(context["drive"]["identity"])
+            except ValueError:
+                pass
+        if context_ready:
+            rows.append(
+                [
+                    {"text": "Quick test", "callback_data": f"dc:{run_id}:quick"},
+                    {"text": "Extended test", "callback_data": f"dc:{run_id}:extended"},
+                ]
+            )
         if (
             event == "finished"
             and controls_authorized
@@ -1103,7 +1289,15 @@ class Engine:
             and current.eligible
             and run
             and run["status"] in TERMINAL
-            and (wait and wait["deadline"] > time.monotonic() and not wait["event"].is_set())
+            and (
+                context_ready
+                or (
+                    event == "finished"
+                    and wait
+                    and wait["deadline"] > time.monotonic()
+                    and not wait["event"].is_set()
+                )
+            )
         ):
             rows.append(
                 [
@@ -1111,11 +1305,20 @@ class Engine:
                     {"text": "Full erase", "callback_data": f"dc:{run_id}:full_erase"},
                 ]
             )
+        if (
+            controls_authorized
+            and run
+            and run["status"] in TERMINAL
+            and not (wait and wait["deadline"] > time.monotonic() and not wait["event"].is_set())
+        ):
+            rows.append(
+                [{"text": "Reconnect / rescan", "callback_data": f"dc:{report_id}:reconnect"}]
+            )
         # Only the authorized private recipient receives a bearer sign-in grant.
         # Group members and forwarded channel audiences must use normal login.
         private_authorized = numeric_chat and int(chat) > 0 and (not sender or sender == chat)
         link = (
-            self.access_links.issue(run_id if run else "")
+            self.access_links.issue(report_id if run else "")
             if private_authorized
             else self.config.public_origin
         )
@@ -1133,9 +1336,21 @@ class Engine:
         return {"inline_keyboard": rows} if rows else None
 
     async def choose_action(self, run_id: str, action: str) -> dict:
-        if action not in {"extended", "eject"}:
+        if action not in {"quick", "extended", "eject"}:
             raise ValueError("Choose Extended or Eject; erase requires dashboard confirmation")
         async with self.enqueue_lock:
+            if run_id in self.reconnect_contexts:
+                if action not in {"quick", "extended"}:
+                    raise ValueError("Choose Quick or Extended from the refreshed controls")
+                drive = self._context_drive(run_id)
+                if self._identity_busy(drive.identity):
+                    raise ValueError("This drive already has testing or safe eject in progress")
+                queued = await self._enqueue_locked(drive.id, action, reconnect_context=run_id)
+                return {
+                    "status": "queued",
+                    "detail": f"{action.title()} test queued.",
+                    "run": queued,
+                }
             wait = self.action_waits.get(run_id)
             run = self.store.get(run_id)
             if not wait or not run or run.get("workflow_status") != "awaiting_action":
@@ -1163,8 +1378,8 @@ class Engine:
             wait["event"].set()
             return {
                 "status": "accepted",
-                "detail": "Extended test requested."
-                if action == "extended"
+                "detail": f"{action.title()} test requested."
+                if action in {"quick", "extended"}
                 else "Safe eject requested.",
             }
 
@@ -1181,10 +1396,7 @@ class Engine:
         )
         delay = self.settings.value.get("auto_eject_delay_seconds", 180)
         can_wait = bool(
-            run.get("automatic")
-            and run["profile"] == "quick"
-            and run["status"] in {"passed", "warning"}
-            and delay > 0
+            run["profile"] == "quick" and run["status"] in {"passed", "warning"} and delay > 0
         )
         wait = None
         if can_wait:
@@ -1195,15 +1407,10 @@ class Engine:
             lifecycle["action_deadline"] = datetime.fromtimestamp(
                 time.time() + delay, UTC
             ).isoformat()
+            lifecycle["action_window_seconds"] = delay
             lifecycle["eject_detail"] = (
                 f"Quick finished. Choose Extended or Eject within {delay} seconds; otherwise the drive ejects automatically."
             )
-        self.record(
-            run,
-            lifecycle["eject_detail"]
-            or "Scan complete; waiting briefly for result notification before safe release.",
-        )
-        message = notifications.run_message(run, self.config.demo)
         if can_wait:
             raw = run.get("results", {}).get("smart_before", {}).get("raw", {})
             info = {
@@ -1217,16 +1424,12 @@ class Engine:
                 run.get("results", {}).get("benchmark", {}).get("read_mbps"),
             )
             run["extended_estimate"] = extended_estimate
-            message += "\nExtended estimate: " + timing.duration(extended_estimate["total_seconds"])
-            if extended_estimate["estimated_finish_at"]:
-                message += " (self-test + benchmark + full read scan; approximate)."
-            else:
-                message += (
-                    "; known/provisional stages are estimated at about "
-                    + timing.duration(extended_estimate["minimum_seconds"])
-                    + "."
-                )
-            message += f"\nQuick is a brief screen, not a full surface test. You have {delay} seconds to choose Run Extended or Eject now. No choice: automatic eject."
+        self.record(
+            run,
+            lifecycle["eject_detail"]
+            or "Scan complete; waiting briefly for result notification before safe release.",
+        )
+        message = notifications.run_message(run, self.config.demo, event="finished")
         notice_id = self.notice(run, "finished", message)
         try:
             if notice_id is not None:
@@ -1241,7 +1444,7 @@ class Engine:
                     # Timeout and click compete for one lock, so only one can win.
                     if self.stopping or asyncio.current_task().cancelling():
                         raise asyncio.CancelledError
-                    if wait["choice"] == "extended" or wait["choice"] in ERASE_PROFILES:
+                    if wait["choice"] in {"quick", "extended", *ERASE_PROFILES}:
                         try:
                             current = await self.hardware.validate(drive)
                             followup = await self._enqueue_locked(
@@ -1270,8 +1473,10 @@ class Engine:
                             self.notice(
                                 run,
                                 "extended",
-                                f"DriveCheck: {followup['profile'].replace('_', ' ')} queued. Safe release follows completion unless firmware recovery is required.\nRun: "
-                                + followup["id"],
+                                f"⏳ {followup['profile'].replace('_', ' ').title()} queued\n\n"
+                                + drive.model
+                                + "\nSerial: "
+                                + drive.serial,
                             )
                             return
                     run["workflow_status"] = "finishing"
@@ -1304,15 +1509,13 @@ class Engine:
         run["workflow_status"] = "complete"
         self.record(run, lifecycle["eject_detail"])
         if lifecycle["eject_status"] == "ejected":
-            ready = notifications.run_message(run, self.config.demo)
+            ready = notifications.run_message(run, self.config.demo, event="ready")
             self.notice(run, "ready", ready)
         else:
             self.notice(
                 run,
                 "release_failed",
-                notifications.run_message(run, self.config.demo)
-                + "\nWhy eject failed: "
-                + lifecycle["eject_detail"],
+                notifications.run_message(run, self.config.demo, event="release_failed"),
             )
 
     async def _wait_for_notice(self, run: dict, notice_id: str) -> None:
@@ -1361,16 +1564,21 @@ class Engine:
         choice_available = (
             wait and wait["deadline"] > time.monotonic() and not wait["event"].is_set()
         )
+        if event == "finished" and run and choice_available:
+            current = copy.deepcopy(run)
+            current["lifecycle"]["action_window_seconds"] = max(
+                1, int(wait["deadline"] - time.monotonic())
+            )
+            return notifications.run_message(current, self.config.demo, event="finished")
         if (
             event == "finished"
             and run
-            and run.get("automatic")
             and run.get("lifecycle", {}).get("action_deadline")
             and (run.get("workflow_status") != "awaiting_action" or not choice_available)
         ):
             return (
-                notifications.run_message(run, self.config.demo)
-                + "\nThe action window has ended. Open the dashboard for current status."
+                notifications.run_message(run, self.config.demo, event="finished")
+                + "\n\nThe action window has ended. Tap Reconnect / rescan to test again."
             )
         return message
 

@@ -61,17 +61,16 @@ async def test_successful_startup_sends_one_ready_notice_with_queue_state(tmp_pa
     engine, store = station(tmp_path, auto_test=True)
     await engine.start()
     try:
-        await wait_until(lambda: any("station ready" in item for item in delivered))
-        ready = [item for item in delivered if "station ready" in item]
+        await wait_until(lambda: any("DriveCheck is ready" in item for item in delivered))
+        ready = [item for item in delivered if "DriveCheck is ready" in item]
         assert len(ready) == 1
-        assert "Platform: test-platform" in ready[0]
-        assert "Software: ready." in ready[0]
-        assert "Testing: simulation ready" in ready[0]
-        assert "Queue: 1 intake job queued." in ready[0]
-        assert engine.booted_at in ready[0]
+        assert "Station: test-platform" in ready[0]
+        assert "Simulation mode is ready" in ready[0]
+        assert "Waiting: 1 queued intake job." in ready[0]
+        assert engine.booted_at not in ready[0]
         engine._queue_startup_ready_notice()
         await asyncio.sleep(0)
-        assert len([item for item in delivered if "station ready" in item]) == 1
+        assert len([item for item in delivered if "DriveCheck is ready" in item]) == 1
     finally:
         await engine.stop()
         store.close()

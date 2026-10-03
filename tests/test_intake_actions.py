@@ -179,11 +179,14 @@ async def test_telegram_keyboard_grants_and_expired_notice_without_provider_io(t
         await asyncio.wait_for(engine.queue.join(), 1)
         refreshed = engine.notice_message(f"{run['id']}:finished", "Choose within 180 seconds")
         assert "action window has ended" in refreshed and "180 seconds" not in refreshed
-        assert "ready to remove" in refreshed
+        assert refreshed.startswith("✅ Quick test passed")
+        assert "Safe eject: Confirmed" in refreshed
         engine.settings.value["notifications"]["provider"] = "telegram"
         expired = engine.telegram_markup(f"{run['id']}:finished")
         assert all(
-            "callback_data" not in button for row in expired["inline_keyboard"] for button in row
+            button.get("callback_data", "").endswith(":reconnect") or "callback_data" not in button
+            for row in expired["inline_keyboard"]
+            for button in row
         )
     finally:
         await engine.stop()
@@ -305,3 +308,35 @@ async def test_stop_during_callback_validation_refuses_orphaned_action(tmp_path,
         await callback
     assert hardware.self_tests == 0
     store.close()
+
+
+async def test_manual_quick_receives_same_action_window_and_buttons(tmp_path):
+    config = Config(tmp_path, api_key="test-token-long-enough", notification_wait_seconds=0)
+    config.prepare()
+    settings = Settings(config)
+    settings.value.update(auto_test=False, auto_eject=True, auto_eject_delay_seconds=180)
+    store = Store(tmp_path / "runs.db")
+    hardware = IntakeHardware()
+    engine = Engine(config, settings, store, hardware)
+    await engine.start()
+    try:
+        queued = await engine.enqueue(engine.drives[0].id, "quick")
+        run = await awaiting(engine)
+        assert run["id"] == queued["id"] and not run["automatic"]
+        assert run["extended_estimate"]["minimum_seconds"] > 0
+        assert hardware.ejected == 0
+        engine.settings.value["notifications"].update(provider="telegram", telegram_chat_id="123")
+        markup = engine.telegram_markup(f"{run['id']}:finished")
+        actions = [
+            button.get("callback_data", "") for row in markup["inline_keyboard"] for button in row
+        ]
+        assert f"dc:{run['id']}:extended" in actions
+        assert f"dc:{run['id']}:eject" in actions
+        await engine.choose_action(run["id"], "eject")
+        await asyncio.wait_for(engine.queue.join(), 1)
+        assert hardware.ejected == 1
+        ready = engine.telegram_markup(f"{run['id']}:ready")
+        assert ready["inline_keyboard"][0][0]["callback_data"] == f"dc:{run['id']}:reconnect"
+    finally:
+        await engine.stop()
+        store.close()

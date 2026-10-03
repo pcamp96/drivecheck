@@ -25,6 +25,7 @@ class Engine:
         self.telegram_error = None
         self.published = 0
         self.actions = []
+        self.reconnects = []
         self.erase_begins = []
         self.erase_confirms = []
 
@@ -33,7 +34,22 @@ class Engine:
 
     async def choose_action(self, run_id, action):
         self.actions.append((run_id, action))
-        return {"status": "accepted"}
+        return {"status": "accepted", "detail": f"{action.title()} test requested."}
+
+    async def reconnect_run(self, run_id):
+        self.reconnects.append(run_id)
+        return {
+            "status": "ready",
+            "message": "Drive reconnected. Choose a test.",
+            "reply_markup": {
+                "inline_keyboard": [
+                    [
+                        {"text": "Quick test", "callback_data": f"dc:{run_id}:quick"},
+                        {"text": "Extended test", "callback_data": f"dc:{run_id}:extended"},
+                    ]
+                ]
+            },
+        }
 
     async def begin_erase(self, run_id, profile, *, chat_id, user_id):
         self.erase_begins.append((run_id, profile, chat_id, user_id))
@@ -192,6 +208,131 @@ async def test_private_chat_defaults_sender_and_erase_never_executes():
     assert engine.actions == []
     assert answers[0]["show_alert"] is True
     assert "dashboard" in answers[0]["text"]
+
+
+async def test_reconnect_rescans_then_sends_fresh_controls_and_acknowledges():
+    engine = Engine()
+    provider_calls = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        provider_calls.append((request.url.path, body))
+        if request.url.path.endswith("/sendMessage"):
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 501}})
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    interface = TelegramInterface(engine, transport=httpx.MockTransport(handler))
+    settings = engine.settings.value["notifications"]
+    signature = ("123:secret_token", "-100", "42")
+    assert await interface._handle_update(
+        "123:secret_token",
+        settings,
+        callback(1, action="reconnect", callback_id="reconnect"),
+        signature,
+    )
+
+    assert engine.reconnects == [RUN_ID]
+    send = next(body for path, body in provider_calls if path.endswith("/sendMessage"))
+    assert send["text"] == "Drive reconnected. Choose a test."
+    assert [button["text"] for button in send["reply_markup"]["inline_keyboard"][0]] == [
+        "Quick test",
+        "Extended test",
+    ]
+    answer = next(
+        body for path, body in provider_calls if path.endswith("/answerCallbackQuery")
+    )
+    assert answer["callback_query_id"] == "reconnect"
+    assert answer["text"] == "Drive reconnected and controls refreshed."
+
+
+async def test_reconnect_requires_principal_and_discards_result_after_settings_revocation():
+    engine = Engine()
+    provider_calls = []
+
+    def handler(request):
+        provider_calls.append(request.url.path)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    interface = TelegramInterface(engine, transport=httpx.MockTransport(handler))
+    settings = engine.settings.value["notifications"]
+    signature = ("123:secret_token", "-100", "42")
+
+    assert await interface._handle_update(
+        "123:secret_token",
+        settings,
+        callback(1, action="reconnect", user=99, callback_id="wrong-user"),
+        signature,
+    )
+    assert engine.reconnects == []
+    assert provider_calls[-1].endswith("/answerCallbackQuery")
+
+    provider_calls.clear()
+
+    async def revoked_reconnect(run_id):
+        engine.reconnects.append(run_id)
+        engine.settings.value["notifications"]["telegram_token"] = "456:new_token"
+        return {
+            "status": "ready",
+            "message": "This stale result must not be sent.",
+            "reply_markup": {"inline_keyboard": []},
+        }
+
+    engine.reconnect_run = revoked_reconnect
+    assert not await interface._handle_update(
+        "123:secret_token",
+        settings,
+        callback(2, action="reconnect", callback_id="revoked"),
+        signature,
+    )
+    assert engine.reconnects == [RUN_ID]
+    assert provider_calls == []
+
+
+async def test_quick_callback_is_supported_but_legacy_erase_remains_blocked():
+    engine = Engine()
+    answers = []
+
+    def handler(request):
+        answers.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    interface = TelegramInterface(engine, transport=httpx.MockTransport(handler))
+    settings = engine.settings.value["notifications"]
+    signature = ("123:secret_token", "-100", "42")
+    assert await interface._handle_update(
+        "123:secret_token", settings, callback(1, action="quick"), signature
+    )
+    assert await interface._handle_update(
+        "123:secret_token", settings, callback(2, action="erase"), signature
+    )
+
+    assert engine.actions == [(RUN_ID, "quick")]
+    assert answers[0]["text"] == "Quick test requested."
+    assert answers[1]["show_alert"] is True
+    assert "dashboard" in answers[1]["text"]
+
+
+async def test_nonaccepted_action_result_is_not_acknowledged_as_requested():
+    engine = Engine()
+
+    async def blocked(_run_id, _action):
+        return {"status": "blocked", "detail": "Reconnect the drive before testing."}
+
+    engine.choose_action = blocked
+    answers = []
+
+    def handler(request):
+        answers.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    interface = TelegramInterface(engine, transport=httpx.MockTransport(handler))
+    settings = engine.settings.value["notifications"]
+    signature = ("123:secret_token", "-100", "42")
+    assert await interface._handle_update(
+        "123:secret_token", settings, callback(1, action="quick"), signature
+    )
+    assert answers[0]["show_alert"] is True
+    assert answers[0]["text"] == "Reconnect the drive before testing."
 
 
 async def test_group_requires_user_id_without_calling_provider():

@@ -2,6 +2,7 @@
 
 import json
 import re
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 import httpx
@@ -151,42 +152,253 @@ async def send(
         ) from None
 
 
-def run_message(run: dict, demo: bool = False) -> str:
-    from drivecheck.reports import failure_reason
+def _clean_line(value: object, *, fallback: str = "", limit: int = 280) -> str:
+    """Keep provider messages short and prevent structured payloads leaking into chat."""
 
-    drive = run["drive"]
-    benchmark = run["results"].get("benchmark", {})
-    speed = benchmark.get("read_mbps")
-    lines = [
-        ("[Simulation] " if demo else "") + f"DriveCheck: {run['status']}",
-        f"{drive['model']} | Serial: {drive['serial'] or 'unavailable'}",
-        f"Profile: {run['profile']} | {run['detail']}",
-    ]
-    if run["status"] == "failed":
-        lines.append(f"Why it failed: {failure_reason(run)}")
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return fallback
+    if text[:1] in "[{" or "\"json_format_version\"" in text:
+        return fallback
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip(" ,;:") + "…"
+    return text
+
+
+def _profile_name(profile: object) -> str:
+    return {
+        "quick": "Quick test",
+        "extended": "Extended test",
+        "verify": "Full verification",
+        "quick_erase": "Quick erase",
+        "full_erase": "Full erase",
+    }.get(str(profile), "Drive test")
+
+
+def _duration(seconds: object) -> str | None:
+    try:
+        remaining = max(0, int(float(seconds)))
+    except (TypeError, ValueError):
+        return None
+    hours, remainder = divmod(remaining, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours} hr {minutes} min" if minutes else f"{hours} hr"
+    if minutes:
+        return f"{minutes} min" if not secs else f"{minutes + 1} min"
+    return f"{secs} sec"
+
+
+def _action_remaining(lifecycle: dict) -> str | None:
+    explicit = lifecycle.get("action_window_seconds")
+    if explicit is not None:
+        return _duration(explicit)
+    deadline = lifecycle.get("action_deadline")
+    if not isinstance(deadline, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        seconds = (parsed - datetime.now(UTC)).total_seconds()
+    except ValueError:
+        return None
+    return _duration(seconds) if seconds > 0 else None
+
+
+def _erase_lines(run: dict) -> list[str]:
     erase = run.get("results", {}).get("erase", {})
     method = erase.get("method") or run.get("erase_method")
-    if method:
-        lines.append(
-            "Erase method: "
-            + {
-                "ata_secure_erase": "drive firmware secure erase",
-                "quick_format_exfat": "quick exFAT format (NOT secure erasure; old files may be recoverable)",
-                "full_overwrite": "complete overwrite with read-back verification",
-            }.get(method, str(method))
-        )
-    if erase.get("recovery_required"):
-        lines.append("Firmware erase recovery required. Do not power off or remove the drive.")
-    if speed is not None:
-        lines.append(f"Sequential read: {speed:.1f} MB/s")
+    if not method:
+        return []
+    label = {
+        "ata_secure_erase": "Drive firmware secure erase",
+        "quick_format_exfat": "Quick exFAT format",
+        "full_overwrite": "Complete overwrite with read-back verification",
+    }.get(method, _clean_line(method, fallback="Unknown method", limit=80))
+    lines = [f"Method: {label}."]
+    if method == "quick_format_exfat":
+        lines.append("Security: Not a secure erase; old files may be recoverable.")
+    return lines
+
+
+def _extended_estimate(run: dict) -> str | None:
+    estimate = run.get("extended_estimate")
+    if not isinstance(estimate, dict):
+        return None
+    duration = _duration(estimate.get("total_seconds"))
+    if duration:
+        return f"Extended estimate: about {duration}."
+    minimum = _duration(estimate.get("minimum_seconds"))
+    if minimum:
+        return f"Extended estimate: at least {minimum}; full timing unavailable."
+    return None
+
+
+def _started_estimate(run: dict) -> str | None:
+    estimate = run.get("estimate")
+    timing = run.get("timing", {})
+    if isinstance(estimate, dict):
+        if estimate.get("total_seconds") is None:
+            minimum = _duration(estimate.get("minimum_seconds"))
+            if minimum:
+                return f"Estimated time: at least {minimum}; full timing unavailable."
+            return None
+        remaining = _duration(timing.get("remaining_seconds"))
+        total = _duration(estimate.get("total_seconds"))
+        duration = remaining or total
+        return f"Estimated time: about {duration}." if duration else None
+    duration = _duration(timing.get("remaining_seconds"))
+    return f"Estimated time: about {duration}." if duration else None
+
+
+def run_message(run: dict, demo: bool = False, event: str | None = None) -> str:
+    from drivecheck.reports import failure_reason
+
+    drive = run.get("drive", {})
+    results = run.get("results", {})
+    benchmark = results.get("benchmark", {})
+    speed = benchmark.get("read_mbps")
     lifecycle = run.get("lifecycle", {})
-    if lifecycle.get("eject_status") == "ejected":
-        lines.append("Drive safely ejected; ready to remove.")
-    elif lifecycle.get("eject_status") == "pending":
-        lines.append("Safe eject pending. Wait for the release confirmation before removal.")
-    elif lifecycle.get("eject_status") in {"failed", "unsupported"}:
-        lines.append("Safe eject was not confirmed. Check the station before removal.")
-    lines.append(f"Run: {run['id']}")
+    status = str(run.get("status", "incomplete"))
+    profile = _profile_name(run.get("profile"))
+    model = _clean_line(drive.get("model"), fallback="Unknown drive", limit=100)
+    serial = _clean_line(drive.get("serial"), fallback="Unavailable", limit=100)
+    simulation = " [Simulation]" if demo else ""
+    recovery = bool(results.get("erase", {}).get("recovery_required"))
+
+    if event is None:
+        if status in {"queued", "running"}:
+            event = "started"
+        elif lifecycle.get("eject_status") == "ejected":
+            event = "ready"
+        elif lifecycle.get("eject_status") in {"failed", "unsupported"}:
+            event = "release_failed"
+        else:
+            event = "finished"
+    if event.startswith("report-"):
+        event = "finished"
+
+    identity = [model, f"Serial: {serial}"]
+    if event == "ready":
+        summary = {
+            "passed": "passed",
+            "warning": "completed with a warning",
+            "failed": "failed",
+            "incomplete": "was incomplete",
+            "cancelled": "was cancelled",
+        }.get(status, status.replace("_", " "))
+        return "\n".join(
+            [
+                f"🟢 Safe to remove{simulation}",
+                "",
+                *identity,
+                "",
+                f"Previous result: {profile} {summary}.",
+                "You can unplug this drive now.",
+            ]
+        )
+
+    if event == "release_failed":
+        release_detail = _clean_line(
+            lifecycle.get("eject_detail"),
+            fallback="The station could not confirm a safe eject.",
+        )
+        result_word = {
+            "passed": "passed",
+            "warning": "completed with a warning",
+            "failed": "failed",
+            "incomplete": "was incomplete",
+            "cancelled": "was cancelled",
+        }.get(status, status.replace("_", " "))
+        return "\n".join(
+            [
+                f"⛔ Eject failed{simulation}",
+                "",
+                *identity,
+                "",
+                f"The {profile.lower()} {result_word}, but the drive was not released.",
+                f"Reason: {release_detail}",
+                "Keep the drive connected and open the dashboard.",
+            ]
+        )
+
+    if event == "started":
+        stage = {
+            "quick": "SMART health, short self-test, and read speed.",
+            "extended": "SMART health, extended self-test, read speed, and a full read scan.",
+            "verify": "A complete write, read-back verification, and final SMART health.",
+            "quick_erase": "The confirmed quick erase method.",
+            "full_erase": "A complete overwrite with read-back verification.",
+        }.get(str(run.get("profile")), "Drive health and read checks.")
+        lines = [f"🔎 {profile} started{simulation}", "", *identity, "", f"Checking: {stage}"]
+        estimate = _started_estimate(run)
+        if estimate:
+            lines.append(estimate)
+        return "\n".join(lines)
+
+    if recovery:
+        lines = [f"⚠️ Firmware erase needs recovery{simulation}", "", *identity, ""]
+        lines.extend(_erase_lines(run))
+        lines.extend(
+            [
+                "DO NOT power off or remove this drive.",
+                "Open the dashboard and follow the recovery instructions.",
+            ]
+        )
+        return "\n".join(lines)
+
+    heading = {
+        "passed": f"✅ {profile} passed",
+        "warning": f"⚠️ {profile} completed with a warning",
+        "failed": f"❌ {profile} failed",
+        "incomplete": f"⚠️ {profile} incomplete",
+        "cancelled": f"⏹️ {profile} cancelled",
+    }.get(status, f"ℹ️ {profile} {status.replace('_', ' ')}")
+    lines = [heading + simulation, "", *identity]
+    if status not in {"passed", "warning"}:
+        reason = _clean_line(
+            failure_reason(run),
+            fallback="The check did not provide a readable reason. Open the attached report.",
+        )
+        lines.extend(["", f"Reason: {reason}"])
+    elif status == "warning":
+        reason = _clean_line(failure_reason(run))
+        if reason and "no specific" not in reason.lower():
+            lines.extend(["", f"Warning: {reason}"])
+
+    result_lines = _erase_lines(run)
+    if speed is not None:
+        try:
+            result_lines.append(f"Read speed: {float(speed):.1f} MB/s.")
+        except (TypeError, ValueError):
+            pass
+    if run.get("profile") == "quick" and status in {"passed", "warning"}:
+        result_lines.append("Scope: Short SMART test + read sample.")
+        estimate = _extended_estimate(run)
+        if estimate:
+            result_lines.append(estimate)
+    if result_lines:
+        lines.extend(["", *result_lines])
+
+    if lifecycle.get("eject_status") == "pending":
+        remaining = _action_remaining(lifecycle)
+        if run.get("workflow_status") == "awaiting_action" and remaining:
+            lines.extend(["", f"Choose the next action below. Auto-eject in {remaining}."])
+        else:
+            lines.extend(["", "Safe eject is in progress.", "Wait for the green Safe to remove message."])
+    elif lifecycle.get("eject_status") == "ejected":
+        lines.extend(["", "Safe eject: Confirmed."])
+    elif lifecycle.get("eject_status") == "not_requested":
+        lines.extend(["", "The drive is still connected."])
+    elif lifecycle.get("eject_status") in {"failed", "unsupported", "interrupted", "unknown"}:
+        lines.extend(
+            [
+                "",
+                "Safe eject was not confirmed.",
+                "Keep the drive connected and check the dashboard.",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -197,30 +409,28 @@ def station_ready_message(
     mode: str,
     capabilities: dict,
     queued: int,
+    auto_test: bool = True,
 ) -> str:
     """Describe station readiness without overstating unavailable hardware features."""
-    lines = [
-        "DriveCheck station ready",
-        f"Started: {booted_at}",
-        f"Mode: {mode} | Platform: {platform}",
-        "Software: ready.",
-    ]
+    del booted_at
+    lines = ["🟢 DriveCheck is ready", ""]
     if mode == "demo":
-        lines.append("Testing: simulation ready; host drives are not accessed.")
+        lines.append("Simulation mode is ready. Host drives will not be accessed.")
+    elif capabilities.get("can_test") and auto_test:
+        lines.append("Dock a drive to start its read-only Quick test.")
     elif capabilities.get("can_test"):
-        lines.append("Testing: read-only drive intake is available.")
+        lines.append("Open the dashboard to start a drive test.")
     else:
-        lines.append("Testing: inventory is available; drive tests are unavailable.")
-    lines.append(
-        "Safe eject: available."
-        if capabilities.get("can_eject")
-        else "Safe eject: unavailable on this station."
-    )
-    lines.append(f"Queue: {queued} intake job{'s' if queued != 1 else ''} queued.")
+        lines.append("Drive inventory is available, but testing is unavailable on this station.")
+    lines.append(f"Station: {_clean_line(platform, fallback='Unknown platform', limit=100)}.")
+    if not capabilities.get("can_eject"):
+        lines.append("Safe eject is unavailable on this station.")
+    if queued:
+        lines.append(f"Waiting: {queued} queued intake job{'s' if queued != 1 else ''}.")
     limitations = [
         str(item).strip() for item in capabilities.get("limitations", []) if str(item).strip()
     ]
     if limitations:
         summary = "; ".join(limitations[:3])
-        lines.append(f"Limitations: {summary[:600]}")
+        lines.append(f"Limited: {_clean_line(summary, limit=300)}")
     return "\n".join(lines)

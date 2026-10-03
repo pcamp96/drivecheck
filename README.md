@@ -114,7 +114,7 @@ USB drive: the service runs Quick read-only checks, saves the report, and sends
 the result message. It holds a passed/warning drive for 180 seconds so you can
 choose **Run Extended** or **Eject now** in Telegram or the dashboard. With no
 choice, it safely powers off
-the drive through UDisks. A second message says **ready to remove** only after
+the drive through UDisks. A separate message says **🟢 Safe to remove** only after
 release is confirmed. The dashboard remains available for observation.
 Headless mode requires tools, raw I/O permissions, and a valid enabled provider
 at startup. It forces automatic testing and eject; write tests stay manual.
@@ -150,12 +150,20 @@ For a private numeric chat ID, only the user with that same numeric ID can contr
 tests. In groups, configure **Authorized Telegram user ID** (or
 `DRIVECHECK_TELEGRAM_USER_ID`) in addition to the chat ID. Both chat and sender must
 match. Channel usernames can receive notices but cannot authorize test controls.
-Buttons only apply to the current connected drive during its action window; expired,
+Successful manual Quick tests use the same 180-second action window as automatic intake when automatic eject is enabled.
+Completion messages offer **Run Extended**, **Eject now**, and available manual erase options.
+After release, **Reconnect / rescan** refreshes the drive inventory. Power-cycle the
+dock or reconnect USB if the drive was powered off. If it is idle and eligible,
+Telegram offers fresh **Quick test**, **Extended test**, and available erase buttons.
+These refreshed buttons expire after five minutes and can only queue one job.
+If automatic intake already started, rescan reports that job rather than queuing a duplicate.
+
+Buttons only apply to the original, safely identified drive; expired,
 replayed, missing, mounted, or replaced drive actions are rejected. When manual
 erase is enabled, **Quick erase** and **Full erase** buttons open a confirmation
 prompt; pressing the button does not write to the drive. Reply to that exact
 prompt with `QUICK ERASE <exact serial>` or `FULL ERASE <exact serial>` within
-120 seconds (or the remaining eject window, whichever is shorter). Only the
+120 seconds (or the remaining action window, whichever is shorter). Only the
 configured chat and authorized sender can confirm. The original eject countdown
 continues while the prompt is open. Discord only sends notifications.
 
@@ -169,6 +177,10 @@ short-lived grant, never the persistent station token; link previews do not rede
 it. Opening the dashboard does not pause the eject timer. Restarting the station
 invalidates outstanding links and action buttons. The dashboard URL still needs
 to be reachable from the phone (for example, connected to your tailnet).
+
+Messages use separate headings for station readiness, testing, results, and safe
+removal. Chat shows the drive identity, a brief result or failure reason, and the
+next action. Full evidence stays in the dashboard and readable report attachments.
 
 After safe power-off, reconnect or cycle the dock's power before another test.
 Filesystem mounting cannot bring an ejected USB device back online. Quick runs the drive's short SMART self-test and a read sample; it does not establish full-surface health.

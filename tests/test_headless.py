@@ -104,12 +104,12 @@ async def test_headless_delivers_then_unmounts_ejects_and_sends_ready(tmp_path, 
         }
         assert hardware.unmount_calls == 0
         assert hardware.eject_calls == 1
-        assert any("Safe eject pending" in message for message in delivered)
+        assert any("Safe eject is in progress" in message for message in delivered)
         for _ in range(20):
-            if any("ready to remove" in message for message in delivered):
+            if any("🟢 Safe to remove" in message for message in delivered):
                 break
             await asyncio.sleep(0.01)
-        assert any("ready to remove" in message for message in delivered)
+        assert any("🟢 Safe to remove" in message for message in delivered)
         state = engine.state()
         assert state["settings"]["auto_test"] is True
         assert state["settings"]["auto_eject"] is True
@@ -147,7 +147,11 @@ async def test_failed_quick_smart_still_ejects_and_sends_failed_ready_notice(tmp
             await asyncio.sleep(0.01)
         assert store.notice_state(f"{run['id']}:ready")["delivered"]
         assert any(
-            "DriveCheck: failed" in message and "ready to remove" in message
+            message.startswith("❌ Quick test failed") and "SMART reports failing health" in message
+            for message in delivered
+        )
+        assert any(
+            message.startswith("🟢 Safe to remove") and "Quick test failed" in message
             for message in delivered
         )
     finally:

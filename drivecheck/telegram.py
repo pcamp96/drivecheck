@@ -10,7 +10,9 @@ import httpx
 
 from drivecheck.hardware import SafetyError
 
-CALLBACK = re.compile(r"dc:([0-9a-f]{32}):(extended|eject|erase|quick_erase|full_erase)\Z")
+CALLBACK = re.compile(
+    r"dc:([0-9a-f]{32}):(quick|extended|eject|reconnect|erase|quick_erase|full_erase)\Z"
+)
 
 
 class TelegramInterface:
@@ -241,6 +243,55 @@ class TelegramInterface:
                 "Erase verification requires the DriveCheck dashboard and exact serial confirmation.",
                 alert=True,
             )
+        if action == "reconnect":
+            try:
+                result = await self.engine.reconnect_run(run_id)
+            except (KeyError, SafetyError, ValueError):
+                if not self._signature_matches(signature):
+                    self._pending.clear()
+                    return False
+                return await self._answer(
+                    token,
+                    callback_id,
+                    "Reconnect unavailable. Power-cycle the drive and try again.",
+                    alert=True,
+                )
+            if not self._signature_matches(signature):
+                self._pending.clear()
+                return False
+            message_text = str(
+                result.get("message")
+                or "DriveCheck refreshed the connected-drive status."
+            )
+            reply_markup = result.get("reply_markup")
+            if not isinstance(reply_markup, dict):
+                reply_markup = None
+            if (
+                await self._send(
+                    token,
+                    actual_chat,
+                    message_text,
+                    reply_markup=reply_markup,
+                )
+                is None
+            ):
+                return False
+            if not self._signature_matches(signature):
+                self._pending.clear()
+                return False
+            status = str(result.get("status") or "")
+            acknowledgement = {
+                "ready": "Drive reconnected and controls refreshed.",
+                "busy": "DriveCheck is still working.",
+                "blocked": "Drive is connected but unavailable.",
+                "needs_reconnect": "Drive is not connected yet.",
+            }.get(status, "Drive status refreshed.")
+            return await self._answer(
+                token,
+                callback_id,
+                acknowledgement,
+                alert=status in {"blocked", "needs_reconnect"},
+            )
         if action in {"quick_erase", "full_erase"}:
             try:
                 intent = await self.engine.begin_erase(
@@ -279,14 +330,31 @@ class TelegramInterface:
                 token, callback_id, "Confirmation required. Reply to the DriveCheck prompt."
             )
         try:
-            await self.engine.choose_action(run_id, action)
+            result = await self.engine.choose_action(run_id, action)
         except (KeyError, SafetyError, ValueError):
+            if not self._signature_matches(signature):
+                self._pending.clear()
+                return False
             return await self._answer(
                 token, callback_id, "Action unavailable. Open the dashboard for current status."
             )
-        confirmation = (
-            "Extended test requested." if action == "extended" else "Safe eject requested."
-        )
+        if not self._signature_matches(signature):
+            self._pending.clear()
+            return False
+        status = str(result.get("status") or "") if isinstance(result, dict) else ""
+        detail = str(result.get("detail") or "") if isinstance(result, dict) else ""
+        if status not in {"accepted", "queued"}:
+            return await self._answer(
+                token,
+                callback_id,
+                detail or "Action unavailable. Open the dashboard for current status.",
+                alert=True,
+            )
+        confirmation = detail or {
+            "quick": "Quick test requested.",
+            "extended": "Extended test requested.",
+            "eject": "Safe eject requested.",
+        }.get(action, "Action requested.")
         return await self._answer(token, callback_id, confirmation)
 
     def _signature_matches(self, signature: tuple[str, str, str]) -> bool:
