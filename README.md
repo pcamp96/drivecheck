@@ -243,5 +243,10 @@ See [Monday's test plan](docs/MONDAY-TEST-PLAN.md),
 - [Discord incoming webhooks](https://docs.discord.com/developers/resources/webhook)
 - [Telegram Bot API](https://core.telegram.org/bots/api#sendmessage)
 
-No remote repository or public release has been created. Licensing and public
-packaging can be decided after physical testing.
+Source: [pcamp96/drivecheck](https://github.com/pcamp96/drivecheck).
+
+## License
+
+DriveCheck is licensed under the [MIT License](LICENSE), copyright 2026 Patrick
+Campanale. Dependencies and system tools retain their respective licenses.
+This source publication is a test build; physical acceptance remains pending.
