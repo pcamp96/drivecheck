@@ -23,7 +23,8 @@ performance claims.
    read-only Extended job queues; only one drive runs at once. Rescan repeatedly
    and check that no duplicate job appears. Disable automation after checking.
 7. Configure your chosen notification provider. Press the test-message button;
-   run a test and confirm the completion message reaches the intended destination.
+   restart the service and confirm the station-ready message arrives before docking
+   a drive, then run a test and confirm the completion message reaches the intended destination.
    Temporarily disconnect the Pi network and confirm result persistence/retry.
 8. Restart the service during a read-only job. Confirm it becomes incomplete,
    preserves results already saved, and doesn't resume or claim a pass.

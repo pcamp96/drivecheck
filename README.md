@@ -194,7 +194,9 @@ notifications, set `DRIVECHECK_NOTIFY_READY=false` to turn this off.
   cannot initiate a private conversation before you start it. The bot must have
   permission to post in its target chat.
 
-Press **Send test notification** to check credentials and destination. Outages
+Press **Send test notification** to check credentials and destination. After
+saving an enabled provider, restart the service with
+`sudo systemctl restart drivecheck` to check the startup-ready notice. Outages
 retry through a persistent SQLite outbox with exponential backoff, up to six
 attempts. Failure is visible on the dashboard; test reports remain saved.
 Delivery is at-least-once: an ambiguous network response or crash immediately

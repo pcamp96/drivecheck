@@ -51,3 +51,27 @@ acceptance flow passed, plus real macOS inventory display and disabled test
 controls without root. Ruff, formatting, JavaScript/shell syntax and whitespace
 checks passed. Updated Pi source archive/wheel are available under ignored dist/.
 Physical Pi/dock behavior and real provider delivery remain acceptance items.
+
+## Linux deployment and station readiness — October 3, 2026
+
+Added a configurable startup-ready notice using the existing durable outbox,
+with boot time and actual capabilities. Failed startup never announces readiness;
+old pending boot notices are replaced after a restart. The CLI binds its listener
+before startup so a port conflict cannot announce a working station.
+
+Added a generic Debian/Ubuntu installer and guarded uninstall command. Default
+uninstall preserves reports, settings and token; explicit --purge-data removes
+those retained directories. Shared system packages remain installed, and the
+manifest preserves the originally added package list across reinstalls.
+
+Deployment on Ubuntu 26.04.1 with Python 3.14.4 was verified through authenticated
+HTTP, SSE, a real browser, system-storage refusal, and a complete uninstall/reinstall
+cycle preserving the database, settings and sign-in token. The service is enabled
+at boot. Existing inference, Docker and Nginx services remained active. No USB
+test drive was connected; no physical benchmark, self-test or eject was run.
+Notification provider credentials still require owner configuration, so readiness
+and result delivery were verified with mocked providers rather than a real chat.
+
+90 tests passed on Python 3.11 and 3.14; Ruff/format, shell and JavaScript syntax,
+secret scan, packaging and browser checks passed. Linux fixture tests cover
+install/reinstall, preservation, purge, unsafe paths and failed-build recovery.
