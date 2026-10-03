@@ -13,7 +13,9 @@ from drivecheck.config import Config
 def main():
     parser = argparse.ArgumentParser(description="DriveCheck drive intake station")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--demo", action="store_true", help="Simulated devices; never inspect host disks")
+    mode.add_argument(
+        "--demo", action="store_true", help="Simulated devices; never inspect host disks"
+    )
     mode.add_argument("--hardware", action="store_true", help="Use real Linux USB drives")
     parser.add_argument("--host", default=os.getenv("DRIVECHECK_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("DRIVECHECK_PORT", "8765")))
@@ -28,13 +30,17 @@ def main():
         if platform.system() != "Linux":
             parser.error("Hardware mode requires Linux. Use --demo on this computer.")
         if os.geteuid() != 0:
-            parser.error("Hardware mode requires root for drive self-tests and raw I/O. Use the systemd installer on your Pi.")
+            parser.error(
+                "Hardware mode requires root for drive self-tests and raw I/O. Use the systemd installer on your Pi."
+            )
     from drivecheck.app import create_app
 
     app = create_app(config)
     print(f"DriveCheck {'simulation' if config.demo else 'hardware'} station")
     print(f"Dashboard: http://{args.host}:{args.port}")
-    print(f"Read your sign-in token from {config.data_dir / 'access-token'} (or use DRIVECHECK_API_KEY)")
+    print(
+        f"Read your sign-in token from {config.data_dir / 'access-token'} (or use DRIVECHECK_API_KEY)"
+    )
     uvicorn.run(app, host=args.host, port=args.port, workers=1, proxy_headers=False)
 
 

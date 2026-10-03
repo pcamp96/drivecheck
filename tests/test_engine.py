@@ -29,13 +29,16 @@ class SlowHardware(Hardware):
         self.cancelled = True
 
 
-@pytest.mark.parametrize(("parts", "status"), [
-    ({"smart": {"health": "passed"}, "scan": {"status": "passed"}}, "passed"),
-    ({"smart": {"health": "unsupported"}, "scan": {"status": "passed"}}, "incomplete"),
-    ({"scan": {"status": "failed"}}, "failed"),
-    ({"smart": {"health": "warning"}}, "warning"),
-    ({}, "incomplete"),
-])
+@pytest.mark.parametrize(
+    ("parts", "status"),
+    [
+        ({"smart": {"health": "passed"}, "scan": {"status": "passed"}}, "passed"),
+        ({"smart": {"health": "unsupported"}, "scan": {"status": "passed"}}, "incomplete"),
+        ({"scan": {"status": "failed"}}, "failed"),
+        ({"smart": {"health": "warning"}}, "warning"),
+        ({}, "incomplete"),
+    ],
+)
 def test_verdict_never_claims_pass_without_complete_checks(parts, status):
     assert verdict(parts)[0] == status
 
@@ -92,3 +95,27 @@ def test_restart_marks_running_and_queued_incomplete(tmp_path):
     assert store.get("queued")["status"] == "incomplete"
     assert store.get("passed")["status"] == "passed"
     store.close()
+
+
+async def test_unexpected_tool_response_does_not_kill_worker(tmp_path):
+    class BadOnce(Hardware):
+        bad = True
+
+        async def smart(self, drive):
+            if self.bad:
+                self.bad = False
+                raise AttributeError("Malformed tool JSON")
+            return await super().smart(drive)
+
+    instance, store = await setup(tmp_path, BadOnce(demo=True))
+    try:
+        run = await instance.enqueue(instance.drives[0].id, "quick")
+        await asyncio.wait_for(instance.queue.join(), 1)
+        assert store.get(run["id"])["status"] == "incomplete"
+        retry = await instance.enqueue(instance.drives[0].id, "quick")
+        await asyncio.wait_for(instance.queue.join(), 1)
+        assert store.get(retry["id"])["status"] == "passed"
+        assert instance.station_error is None
+    finally:
+        await instance.stop()
+        store.close()

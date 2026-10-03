@@ -67,7 +67,9 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             lock.close()
-            raise RuntimeError("Another DriveCheck process is using this data directory. Use one worker.") from None
+            raise RuntimeError(
+                "Another DriveCheck process is using this data directory. Use one worker."
+            ) from None
         store = Store(config.data_dir / "drivecheck.sqlite3")
         engine = Engine(config, Settings(config), store, hardware)
         app.state.engine = engine
@@ -80,7 +82,14 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
             fcntl.flock(lock, fcntl.LOCK_UN)
             lock.close()
 
-    app = FastAPI(title="DriveCheck", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(
+        title="DriveCheck",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.state.config = config
 
     @app.exception_handler(RequestValidationError)
@@ -94,9 +103,17 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
         expected = config.public_origin or str(request.base_url).rstrip("/")
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             if origin and origin.rstrip("/") != expected:
-                return JSONResponse(status_code=403, content={"detail": "Cross-origin changes are blocked"})
-            if request.cookies.get("drivecheck_session") and not origin and not request.headers.get("authorization"):
-                return JSONResponse(status_code=403, content={"detail": "A same-origin request is required"})
+                return JSONResponse(
+                    status_code=403, content={"detail": "Cross-origin changes are blocked"}
+                )
+            if (
+                request.cookies.get("drivecheck_session")
+                and not origin
+                and not request.headers.get("authorization")
+            ):
+                return JSONResponse(
+                    status_code=403, content={"detail": "A same-origin request is required"}
+                )
         length = request.headers.get("content-length", "0")
         try:
             too_large = int(length) > 16384
@@ -108,7 +125,9 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        )
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
         return response
@@ -116,7 +135,9 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
     def authenticated(request: Request):
         authorization = request.headers.get("authorization", "")
         if authorization:
-            if authorization.startswith("Bearer ") and secrets.compare_digest(authorization[7:], config.api_key):
+            if authorization.startswith("Bearer ") and secrets.compare_digest(
+                authorization[7:], config.api_key
+            ):
                 return True
             raise HTTPException(401, "Invalid API bearer token")
         session = request.cookies.get("drivecheck_session", "")
@@ -154,7 +175,15 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
         session = secrets.token_urlsafe(32)
         sessions[session] = timestamp + 12 * 3600
         response = JSONResponse({"ok": True})
-        response.set_cookie("drivecheck_session", session, max_age=12 * 3600, httponly=True, secure=config.secure_cookie, samesite="strict", path="/api")
+        response.set_cookie(
+            "drivecheck_session",
+            session,
+            max_age=12 * 3600,
+            httponly=True,
+            secure=config.secure_cookie,
+            samesite="strict",
+            path="/api",
+        )
         return response
 
     @app.post("/api/logout", dependencies=[Depends(authenticated)])
@@ -189,7 +218,12 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
                         return
             finally:
                 instance.subscribers.discard(queue)
-        return StreamingResponse(stream(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"})
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"},
+        )
 
     @app.post("/api/scan", dependencies=[Depends(authenticated)])
     async def scan():
@@ -220,7 +254,10 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
     @app.get("/api/runs/{run_id}/report", dependencies=[Depends(authenticated)])
     async def report(run_id: str):
         run = get_run(run_id)
-        return JSONResponse({"schema_version": 1, "simulated": config.demo, **run}, headers={"Content-Disposition": f'attachment; filename="drivecheck-{run["id"]}.json"'})
+        return JSONResponse(
+            {"schema_version": 1, "simulated": config.demo, **run},
+            headers={"Content-Disposition": f'attachment; filename="drivecheck-{run["id"]}.json"'},
+        )
 
     @app.get("/api/runs/{run_id}", dependencies=[Depends(authenticated)])
     async def read_run(run_id: str):
@@ -239,7 +276,11 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
     @app.post("/api/notifications/test", dependencies=[Depends(authenticated)])
     async def notification_test():
         try:
-            await notifications.send(engine().settings.value["notifications"], ("[Simulation] " if config.demo else "") + "DriveCheck test message: notifications are configured.")
+            await notifications.send(
+                engine().settings.value["notifications"],
+                ("[Simulation] " if config.demo else "")
+                + "DriveCheck test message: notifications are configured.",
+            )
             engine().notification_error = None
             engine().publish()
             return {"ok": True}

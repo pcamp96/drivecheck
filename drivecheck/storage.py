@@ -9,7 +9,9 @@ class Store:
     def __init__(self, path: Path):
         self.db = sqlite3.connect(path)
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, created TEXT, data TEXT)")
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, created TEXT, data TEXT)"
+        )
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, message TEXT, "
             "attempts INTEGER DEFAULT 0, due REAL DEFAULT 0, delivered INTEGER DEFAULT 0, error TEXT)"
@@ -39,11 +41,17 @@ class Store:
             if run["status"] in {"running", "queued"}:
                 from drivecheck.engine import now
 
-                run.update(status="incomplete", finished_at=now(), detail="Service restarted before this test finished. Start a new test to retry.")
+                run.update(
+                    status="incomplete",
+                    finished_at=now(),
+                    detail="Service restarted before this test finished. Start a new test to retry.",
+                )
                 self.save(run)
 
     def enqueue_notice(self, notice_id: str, message: str) -> None:
-        self.db.execute("INSERT OR IGNORE INTO outbox(id,message) VALUES (?,?)", (notice_id, message))
+        self.db.execute(
+            "INSERT OR IGNORE INTO outbox(id,message) VALUES (?,?)", (notice_id, message)
+        )
         self.db.commit()
 
     def pending_notices(self, timestamp: float) -> list[tuple]:
@@ -57,7 +65,10 @@ class Store:
         self.db.commit()
 
     def notice_failed(self, notice_id: str, attempts: int, due: float, error: str) -> None:
-        self.db.execute("UPDATE outbox SET attempts=?,due=?,error=? WHERE id=?", (attempts, due, error, notice_id))
+        self.db.execute(
+            "UPDATE outbox SET attempts=?,due=?,error=? WHERE id=?",
+            (attempts, due, error, notice_id),
+        )
         self.db.commit()
 
     def close(self) -> None:

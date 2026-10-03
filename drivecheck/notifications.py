@@ -20,7 +20,9 @@ def validate_settings(settings: dict) -> None:
             url.scheme != "https"
             or url.hostname not in {"discord.com", "canary.discord.com", "ptb.discord.com"}
             or url.port not in {None, 443}
-            or url.username or url.password or url.fragment
+            or url.username
+            or url.password
+            or url.fragment
             or not re.fullmatch(r"/api(?:/v\d+)?/webhooks/\d+/[A-Za-z0-9_-]+", url.path)
         ):
             raise ValueError("Enter a valid HTTPS Discord incoming webhook URL")
@@ -45,7 +47,9 @@ async def send(settings: dict, message: str, transport=None) -> None:
         raise NotificationError("Notifications are disabled. Save an enabled provider first.")
     provider = settings["provider"]
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=False, transport=transport, trust_env=False) as client:
+        async with httpx.AsyncClient(
+            timeout=15, follow_redirects=False, transport=transport, trust_env=False
+        ) as client:
             if provider == "discord":
                 response = await client.post(
                     settings["discord_webhook"],
@@ -58,15 +62,23 @@ async def send(settings: dict, message: str, transport=None) -> None:
                     json={"chat_id": settings["telegram_chat_id"], "text": message[:4000]},
                 )
             if response.status_code == 429:
-                raise NotificationError(f"{provider.title()} rate limit reached; delivery will retry")
+                raise NotificationError(
+                    f"{provider.title()} rate limit reached; delivery will retry"
+                )
             if not 200 <= response.status_code < 300:
-                raise NotificationError(f"{provider.title()} rejected delivery (HTTP {response.status_code}). Check provider credentials and permissions.")
+                raise NotificationError(
+                    f"{provider.title()} rejected delivery (HTTP {response.status_code}). Check provider credentials and permissions."
+                )
             if provider == "telegram" and not response.json().get("ok"):
-                raise NotificationError("Telegram did not confirm delivery. Check bot access to the chat.")
+                raise NotificationError(
+                    "Telegram did not confirm delivery. Check bot access to the chat."
+                )
     except NotificationError:
         raise
     except (httpx.HTTPError, ValueError):
-        raise NotificationError(f"{provider.title()} delivery could not be confirmed. Check connectivity and configuration.") from None
+        raise NotificationError(
+            f"{provider.title()} delivery could not be confirmed. Check connectivity and configuration."
+        ) from None
 
 
 def run_message(run: dict, demo: bool = False) -> str:

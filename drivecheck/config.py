@@ -31,6 +31,7 @@ class Config:
     api_key: str = ""
     public_origin: str = ""
     secure_cookie: bool = False
+    demo_step_seconds: float = 0
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -42,6 +43,7 @@ class Config:
             api_key=os.getenv("DRIVECHECK_API_KEY", ""),
             public_origin=os.getenv("DRIVECHECK_PUBLIC_ORIGIN", "").rstrip("/"),
             secure_cookie=boolean(os.getenv("DRIVECHECK_SECURE_COOKIE")),
+            demo_step_seconds=max(0, float(os.getenv("DRIVECHECK_DEMO_STEP_SECONDS", "0.25"))),
         )
 
     def prepare(self) -> None:
@@ -87,7 +89,9 @@ class Settings:
         value = json.loads(json.dumps(self.value))
         notice = value["notifications"]
         notice["discord_configured"] = bool(notice["discord_webhook"])
-        notice["telegram_configured"] = bool(notice["telegram_token"] and notice["telegram_chat_id"])
+        notice["telegram_configured"] = bool(
+            notice["telegram_token"] and notice["telegram_chat_id"]
+        )
         notice["discord_webhook"] = ""
         notice["telegram_token"] = ""
         value["allow_destructive"] = self.config.allow_destructive
