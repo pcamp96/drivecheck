@@ -31,6 +31,8 @@ let selectedRunId = null;
 let verifyDrive = null;
 let settingsDirty = false;
 let reconnectTimer = null;
+let driveRenderSignature = null;
+let focusActiveRunOnRender = false;
 
 function textNode(tag, text, className) {
   const node = document.createElement(tag);
@@ -177,11 +179,16 @@ const phaseOrder = ["smart_before", "self_test", "benchmark", "surface", "smart_
 
 function renderActive() {
   const run = activeRun();
+  const cancelHadFocus = document.activeElement === elements.cancelButton;
   elements.activeEmpty.hidden = Boolean(run);
   elements.activeContent.hidden = !run;
   elements.cancelButton.hidden = !run;
   if (!run) {
     elements.activeSubtitle.textContent = "The station is ready for a drive.";
+    if (cancelHadFocus || focusActiveRunOnRender) {
+      focusActiveRunOnRender = false;
+      $("#active-title").focus({ preventScroll: true });
+    }
     return;
   }
   const drive = run.drive || {};
@@ -206,13 +213,31 @@ function renderActive() {
     item.classList.toggle("done", !skipped && (currentIndex > index || (progress === 100 && run.results?.[phase])));
     item.title = skipped ? "Not included in the quick profile" : "";
   });
+  if (focusActiveRunOnRender) {
+    focusActiveRunOnRender = false;
+    elements.cancelButton.focus({ preventScroll: true });
+  }
 }
 
 function renderDrives() {
-  elements.driveList.replaceChildren();
   const drives = snapshot.drives || [];
-  elements.drivesEmpty.hidden = drives.length > 0;
   const busy = Boolean(activeRun());
+  const signature = JSON.stringify({
+    busy,
+    allowDestructive: Boolean(snapshot.settings?.allow_destructive),
+    drives: drives.map((drive) => ({
+      id: drive.id, path: drive.path, model: drive.model, serial: drive.serial,
+      size_bytes: drive.size_bytes, transport: drive.transport, eligible: drive.eligible,
+      reasons: drive.reasons, identity: drive.identity, mounted: drive.mounted
+    }))
+  });
+  if (signature === driveRenderSignature) return;
+  const focusedAction = elements.driveList.contains(document.activeElement)
+    ? { driveId: document.activeElement.dataset.driveId, profile: document.activeElement.dataset.profile }
+    : null;
+  driveRenderSignature = signature;
+  elements.driveList.replaceChildren();
+  elements.drivesEmpty.hidden = drives.length > 0;
   drives.forEach((drive) => {
     const card = document.createElement("article");
     card.className = `drive-card ${drive.eligible ? "" : "ineligible"}`;
@@ -239,11 +264,18 @@ function renderDrives() {
     card.append(main, capacity, connection, state, actions, help);
     elements.driveList.append(card);
   });
+  if (focusedAction && !busy) {
+    const restored = Array.from(elements.driveList.querySelectorAll("button")).find((button) =>
+      button.dataset.driveId === focusedAction.driveId && button.dataset.profile === focusedAction.profile);
+    restored?.focus({ preventScroll: true });
+  }
 }
 
 function runButton(label, drive, profile, extraDisabled, destructive = false) {
   const button = textNode("button", label, destructive ? "danger-outline" : (profile === "extended" ? "quiet-button" : ""));
   button.type = "button";
+  button.dataset.driveId = drive.id;
+  button.dataset.profile = profile;
   button.disabled = !drive.eligible || extraDisabled;
   if (destructive && !snapshot.settings?.allow_destructive) button.title = "Destructive verification is disabled in the station configuration.";
   button.addEventListener("click", () => destructive ? openVerify(drive) : startRun(drive, profile));
@@ -264,6 +296,9 @@ function phaseLabel(phase) {
 }
 
 function renderRuns() {
+  const focusedRunId = elements.runList.contains(document.activeElement)
+    ? document.activeElement.dataset.runId
+    : null;
   elements.runList.replaceChildren();
   const runs = snapshot.runs || [];
   if (!runs.length) elements.runList.append(textNode("div", "Completed tests will appear here.", "empty-state"));
@@ -272,6 +307,7 @@ function renderRuns() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `run-item ${run.id === selectedRunId ? "selected" : ""}`;
+    button.dataset.runId = run.id;
     button.setAttribute("role", "listitem");
     button.append(
       textNode("strong", run.drive?.model || run.drive_id || "Unknown drive"),
@@ -281,6 +317,10 @@ function renderRuns() {
     button.addEventListener("click", () => { selectedRunId = run.id; renderRuns(); renderReport(run); });
     elements.runList.append(button);
   });
+  if (focusedRunId) {
+    const restored = Array.from(elements.runList.querySelectorAll(".run-item")).find((button) => button.dataset.runId === focusedRunId);
+    restored?.focus({ preventScroll: true });
+  }
   if (selectedRunId) {
     const selected = runs.find((run) => run.id === selectedRunId);
     if (selected) renderReport(selected);
@@ -288,7 +328,11 @@ function renderRuns() {
 }
 
 function renderReport(run) {
+  const openPhases = elements.report.dataset.runId === run.id
+    ? new Set(Array.from(elements.report.querySelectorAll("details[open][data-phase]")).map((details) => details.dataset.phase))
+    : new Set();
   elements.report.replaceChildren();
+  elements.report.dataset.runId = run.id;
   const header = document.createElement("div");
   header.className = "report-head";
   const title = document.createElement("div");
@@ -311,6 +355,8 @@ function renderReport(run) {
     if (value == null) return;
     const details = document.createElement("details");
     details.className = "result-row";
+    details.dataset.phase = key;
+    details.open = openPhases.has(key);
     const resultStatus = value.status || value.health || "recorded";
     const summaryLine = document.createElement("summary");
     summaryLine.append(textNode("span", labels[key]), textNode("span", statusLabel(resultStatus), `status-pill ${resultStatus}`));
@@ -370,6 +416,7 @@ async function startRun(drive, profile, confirmation) {
     if (confirmation) body.confirmation = confirmation;
     const run = await api("/api/runs", { method: "POST", body });
     selectedRunId = run?.id || selectedRunId;
+    focusActiveRunOnRender = true;
     toast(`${profileLabel(profile)} test queued for ${drive.model || drive.serial}.`);
     await refreshState();
     document.querySelector("#active").scrollIntoView({ behavior: "smooth" });
