@@ -38,14 +38,34 @@ class Store:
         rows = self.db.execute("SELECT data FROM runs").fetchall()
         for (data,) in rows:
             run = json.loads(data)
+            lifecycle = run.setdefault(
+                "lifecycle",
+                {
+                    "notification_status": "disabled",
+                    "eject_status": "not_requested",
+                    "eject_detail": "",
+                },
+            )
+            if run.get("workflow_status") == "finishing":
+                run["workflow_status"] = "interrupted"
+                lifecycle["eject_status"] = "failed"
+                lifecycle["eject_detail"] = (
+                    "Service restarted before safe release completed. Inspect the connected "
+                    "drive and start a new intake after physically reconnecting it."
+                )
+                self.save(run)
+                continue
             if run["status"] in {"running", "queued"}:
                 from drivecheck.engine import now
 
                 run.update(
                     status="incomplete",
+                    workflow_status="interrupted",
                     finished_at=now(),
                     detail="Service restarted before this test finished. Start a new test to retry.",
                 )
+                lifecycle["eject_status"] = "not_requested"
+                lifecycle["eject_detail"] = "The interrupted test was not automatically released."
                 self.save(run)
 
     def enqueue_notice(self, notice_id: str, message: str) -> None:
@@ -63,6 +83,14 @@ class Store:
     def delivered(self, notice_id: str) -> None:
         self.db.execute("UPDATE outbox SET delivered=1,error=NULL WHERE id=?", (notice_id,))
         self.db.commit()
+
+    def notice_state(self, notice_id: str) -> dict | None:
+        row = self.db.execute(
+            "SELECT attempts,delivered,error FROM outbox WHERE id=?", (notice_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {"attempts": row[0], "delivered": bool(row[1]), "error": row[2]}
 
     def notice_failed(self, notice_id: str, attempts: int, due: float, error: str) -> None:
         self.db.execute(
