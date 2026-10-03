@@ -125,9 +125,10 @@ async def test_demo_never_runs_host_commands() -> None:
     assert (await hardware.eject(drives[0]))["status"] == "ejected"
 
 
-def test_platform_factory_selects_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_platform_factory_keeps_demo_platform_neutral(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("drivecheck.hardware.platform.system", lambda: "Darwin")
-    assert get_hardware(demo=True).__class__.__name__ == "MacHardware"
+    assert type(get_hardware(demo=True)) is Hardware
+    assert get_hardware(demo=False).__class__.__name__ == "MacHardware"
 
 
 def test_linux_capabilities_require_root_and_fio(monkeypatch: pytest.MonkeyPatch) -> None:

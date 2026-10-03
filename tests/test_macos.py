@@ -56,6 +56,8 @@ def info(identifier: str = "disk4") -> dict:
         "TotalSize": 1_000_000_000,
         "DeviceBlockSize": 512,
         "MediaName": "Fixture Drive",
+        "IORegistryEntryName": "Fixture Drive Media",
+        "DeviceTreePath": "IODeviceTree:/fixture/usb-port@02200000",
         "BusProtocol": "USB",
         "Internal": False,
         "Whole": True,
@@ -66,14 +68,19 @@ def info(identifier: str = "disk4") -> dict:
 def registry(identifier: str = "disk4", serial: str = "MAC-SERIAL-1") -> list[dict]:
     return [
         {
-            "Device Characteristics": {
-                "Serial Number": serial.encode(),
-                "Vendor Name": b"Fixture",
-                "Product Name": b"Drive",
-            },
+            "USB Serial Number": f"   {serial}\x00".encode(),
+            "USB Vendor Name": b"Fixture Bridge",
+            "USB Product Name": b"USB SATA",
+            "IORegistryEntryLocation": "02200000",
             "IORegistryEntryChildren": [
-                {"BSD Name": identifier.encode()},
-                {"BSD Name": f"{identifier}s1".encode()},
+                {
+                    "IOObjectClass": "IOMedia",
+                    "IORegistryEntryName": "Fixture Drive Media",
+                    "IORegistryEntryChildren": [
+                        {"BSD Name": identifier.encode()},
+                        {"BSD Name": f"{identifier}s1".encode()},
+                    ],
+                }
             ],
         }
     ]
@@ -143,6 +150,19 @@ async def test_missing_or_ambiguous_registry_serial_fails_closed() -> None:
     drive = (await hardware.discover())[0]
     assert drive.eligible is False
     assert "missing_serial" in drive.reasons
+
+
+@pytest.mark.asyncio
+async def test_usb_location_disambiguates_identical_media_names() -> None:
+    hardware = MacHardware(demo=False)
+    other = registry(serial="OTHER-SERIAL")[0]
+    other["IORegistryEntryLocation"] = "03300000"
+    responses = inventory()
+    responses[1] = plist_result([other, registry()[0]])
+    hardware._discovery_runner = PlistRunner(responses)
+    drive = (await hardware.discover())[0]
+    assert drive.serial == "MAC-SERIAL-1"
+    assert drive.eligible is True
 
 
 @pytest.mark.asyncio

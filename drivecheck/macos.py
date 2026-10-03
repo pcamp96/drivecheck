@@ -15,8 +15,8 @@ from drivecheck.hardware import CommandError, Drive, Hardware, Progress, SafetyE
 
 def _string(value: Any) -> str:
     if isinstance(value, bytes):
-        return value.decode(errors="replace").strip()
-    return str(value or "").strip()
+        return value.decode(errors="replace").replace("\x00", "").strip()
+    return str(value or "").replace("\x00", "").strip()
 
 
 def _whole(identifier: str) -> str:
@@ -70,7 +70,7 @@ class MacHardware(Hardware):
             "diskutil", "list", "-plist", "external", "physical", required=True
         )
         ioreg = await self._plist_command(
-            "ioreg", "-a", "-r", "-c", "IOBlockStorageDevice", required=True
+            "ioreg", "-a", "-r", "-c", "IOUSBHostDevice", required=True
         )
         apfs, apfs_known = await self._optional_plist("diskutil", "apfs", "list", "-plist")
         root_info, root_known = await self._optional_plist("diskutil", "info", "-plist", "/")
@@ -99,15 +99,30 @@ class MacHardware(Hardware):
             )
             if not isinstance(info, dict):
                 raise CommandError("diskutil info returned an unexpected plist")
-            bsd_names = self._entry_bsd_names(entry)
-            bsd_names.add(identifier)
-            matches = [device for device in registry if device["bsd_names"].intersection(bsd_names)]
+            bsd_names = self._entry_bsd_names(entry) | {identifier}
+            media_entry_name = _string(info.get("IORegistryEntryName"))
+            device_tree_location = self._device_tree_location(_string(info.get("DeviceTreePath")))
+            matches = [
+                device
+                for device in registry
+                if (
+                    device["bsd_names"].intersection(bsd_names)
+                    or (media_entry_name and media_entry_name in device["media_names"])
+                )
+                and (
+                    not device_tree_location
+                    or not device["location"]
+                    or device_tree_location == device["location"]
+                )
+            ]
             serials = {device["serial"] for device in matches if device["serial"]}
             models = {device["model"] for device in matches if device["model"]}
             serial = next(iter(serials)) if len(serials) == 1 else ""
-            model = next(iter(models)) if len(models) == 1 else ""
             model = (
-                model or _string(info.get("MediaName") or info.get("DeviceName")) or "Unknown drive"
+                media_entry_name.removesuffix(" Media")
+                or _string(info.get("MediaName") or info.get("DeviceName"))
+                or (next(iter(models)) if len(models) == 1 else "")
+                or "Unknown drive"
             )
             try:
                 size = int(info.get("TotalSize") or entry.get("Size") or 0)
@@ -293,22 +308,50 @@ class MacHardware(Hardware):
                 for descendant in _children(node)
                 if _string(descendant.get("BSD Name"))
             }
-            if not bsd_names:
+            media_names = {
+                _string(descendant.get("IORegistryEntryName"))
+                for descendant in _children(node)
+                if _string(descendant.get("IOObjectClass")) == "IOMedia"
+                and _string(descendant.get("IORegistryEntryName"))
+            }
+            if not bsd_names and not media_names:
                 continue
             serial = _string(
-                characteristics.get("Serial Number")
+                node.get("USB Serial Number")
+                or node.get("kUSBSerialNumberString")
+                or characteristics.get("Serial Number")
                 or characteristics.get("USB Serial Number")
                 or node.get("Serial Number")
             )
             product = _string(
-                characteristics.get("Product Name")
+                node.get("USB Product Name")
+                or node.get("kUSBProductString")
+                or characteristics.get("Product Name")
                 or characteristics.get("Product")
                 or node.get("Product Name")
             )
-            vendor = _string(characteristics.get("Vendor Name") or characteristics.get("Vendor"))
+            vendor = _string(
+                node.get("USB Vendor Name")
+                or node.get("kUSBVendorString")
+                or characteristics.get("Vendor Name")
+                or characteristics.get("Vendor")
+            )
             model = " ".join(part for part in (vendor, product) if part).strip()
-            devices.append({"bsd_names": bsd_names, "serial": serial, "model": model})
+            devices.append(
+                {
+                    "bsd_names": bsd_names,
+                    "media_names": media_names,
+                    "serial": serial,
+                    "model": model,
+                    "location": _string(node.get("IORegistryEntryLocation")),
+                }
+            )
         return devices
+
+    @staticmethod
+    def _device_tree_location(path: str) -> str:
+        match = re.search(r"@([0-9a-fA-F]+)$", path)
+        return match.group(1) if match else ""
 
     @staticmethod
     def _entry_bsd_names(entry: dict[str, Any]) -> set[str]:

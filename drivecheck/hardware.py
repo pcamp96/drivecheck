@@ -1062,8 +1062,10 @@ __all__ = [
 
 def get_hardware(demo: bool) -> Hardware:
     """Return the native hardware adapter without importing macOS code on Linux."""
+    if demo:
+        return Hardware(demo=True)
     if platform.system() == "Darwin":
         from drivecheck.macos import MacHardware
 
-        return MacHardware(demo=demo)
-    return Hardware(demo=demo)
+        return MacHardware(demo=False)
+    return Hardware(demo=False)
