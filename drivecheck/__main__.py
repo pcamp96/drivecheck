@@ -43,7 +43,14 @@ def main():
 
     app = create_app(config)
     server_config = uvicorn.Config(
-        app, host=args.host, port=args.port, workers=1, proxy_headers=False
+        app,
+        host=args.host,
+        port=args.port,
+        workers=1,
+        proxy_headers=False,
+        # Live dashboard streams stay open indefinitely. Bound HTTP draining so
+        # shutdown reaches lifespan cleanup and cancels hardware work safely.
+        timeout_graceful_shutdown=5,
     )
     # Reserve the endpoint before lifespan can announce readiness or queue work.
     listener = server_config.bind_socket()
