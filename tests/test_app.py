@@ -136,6 +136,22 @@ def test_settings_secrets_preserved_atomic_and_invalid_inputs_redacted(tmp_path)
         assert (tmp_path / "settings.json").stat().st_mode & 0o777 == 0o600
 
 
+def test_report_retest_is_authenticated_and_always_read_only(tmp_path):
+    with TestClient(app(tmp_path, demo_step_seconds=0.001)) as client:
+        drive = client.get("/api/state", headers=AUTH).json()["drives"][0]
+        run = client.post(
+            "/api/runs", headers=AUTH, json={"drive_id": drive["id"], "profile": "quick"}
+        ).json()
+        wait_finished(client, run["id"])
+        path = f"/api/runs/{run['id']}/retest"
+        assert client.post(path).status_code == 401
+        assert client.post("/api/runs/missing/retest", headers=AUTH).status_code == 409
+        response = client.post(path, headers=AUTH, json={"profile": "verify"})
+        assert response.status_code == 200
+        assert response.json()["run"]["profile"] == "extended"
+        assert wait_finished(client, response.json()["run"]["id"])["status"] == "passed"
+
+
 def test_auto_read_only_and_login_throttle(tmp_path):
     with TestClient(app(tmp_path, allow_destructive=True)) as client:
         client.put("/api/settings", headers=AUTH, json={"auto_test": True})

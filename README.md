@@ -124,6 +124,8 @@ after the bounded delivery wait. Notification and eject outcomes are recorded
 separately from the test verdict. Failed or unsupported eject never produces a
 ready-to-remove confirmation. Cancellation does not automatically eject. An
 interrupted post-test release is recorded and never blindly resumed on restart.
+Failed drive tests also take this release path when automatic eject is enabled;
+the failed verdict stays in the report even after a successful eject.
 An already tested drive isn't repeatedly scanned while it remains connected;
 the station must observe a detach before automatic retesting.
 
@@ -147,6 +149,19 @@ Each drive is attempted once per observed connection. On service restart,
 already-recorded drives aren't automatically retested; run a manual test or
 unplug/reconnect to retry. Unplugging and reconnecting between discovery polls
 may not be observed; use a manual test in that case.
+
+The dashboard's Settings view uses one vertical form. Automation switches save
+immediately and show success or an error; notification edits use Save settings.
+SMART health and self-test reports explain the outcome and available evidence in
+plain language. Raw JSON remains available under Technical details and Export JSON.
+
+Completed reports offer safe eject and read-only retest controls. After Linux
+USB power-off or macOS eject, reconnect the drive or power-cycle its dock first.
+The operating system has removed the device; a filesystem mount cannot bring it
+back. The retest button checks for the same uniquely identified, unmounted drive
+and always queues Extended read-only checks, even for a historical erase report.
+If automatic intake already queued that reconnected drive, the button opens the
+existing job instead of starting a duplicate. A mounted drive stays blocked.
 
 Eligibility is conservative: only unmounted external disks (USB on Linux) with a unique serial and
 valid capacity are accepted. System storage, mounted partitions, active swap,

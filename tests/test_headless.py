@@ -118,6 +118,151 @@ async def test_headless_delivers_then_unmounts_ejects_and_sends_ready(tmp_path, 
         store.close()
 
 
+async def test_failed_self_test_still_ejects_and_sends_failed_ready_notice(tmp_path, monkeypatch):
+    delivered = []
+
+    async def send(settings, message, transport=None):
+        delivered.append(message)
+
+    class FailedHardware(HeadlessHardware):
+        async def self_test(self, drive, progress):
+            return {"status": "failed", "detail": "Completed: read failure"}
+
+    monkeypatch.setattr(notifications, "send", send)
+    config, settings, store = configured(tmp_path)
+    hardware = FailedHardware()
+    engine = Engine(config, settings, store, hardware)
+    await engine.start()
+    try:
+        await asyncio.wait_for(engine.queue.join(), 2)
+        run = store.runs()[0]
+        assert run["status"] == "failed"
+        assert "benchmark" not in run["results"]
+        assert run["lifecycle"]["eject_status"] == "ejected"
+        assert hardware.eject_calls == 1
+        for _ in range(30):
+            if store.notice_state(f"{run['id']}:ready")["delivered"]:
+                break
+            await asyncio.sleep(0.01)
+        assert store.notice_state(f"{run['id']}:ready")["delivered"]
+        assert any(
+            "DriveCheck: failed" in message and "ready to remove" in message
+            for message in delivered
+        )
+    finally:
+        await engine.stop()
+        store.close()
+
+
+async def finished_run(engine):
+    await engine.scan()
+    run = await engine.enqueue(engine.drives[0].id, "extended")
+    run.update(status="failed", workflow_status="complete", profile="verify")
+    engine.store.save(run)
+    engine.queue.get_nowait()
+    engine.queue.task_done()
+    return run
+
+
+async def test_retest_requires_reconnection_and_never_repeats_destructive_profile(tmp_path):
+    config, settings, store = configured(tmp_path, headless=False)
+    hardware = HeadlessHardware()
+    engine = Engine(config, settings, store, hardware)
+    original = await finished_run(engine)
+    hardware.present = False
+    absent = await engine.retest(original["id"])
+    assert absent["status"] == "reconnect_required"
+    assert engine.queue.empty()
+    hardware.present = True
+    retry = await engine.retest(original["id"])
+    assert retry["run"]["profile"] == "extended"
+    assert retry["run"]["id"] != original["id"]
+    assert len(store.runs()) == 2
+    # Repeated clicks return the same queued run, not an additional job.
+    assert (await engine.retest(original["id"]))["run"]["id"] == retry["run"]["id"]
+    assert engine.queue.qsize() == 1
+    store.close()
+
+
+async def test_retest_refuses_mounted_drive_and_deduplicates_automatic_reconnect(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+
+    config, settings, store = configured(tmp_path, headless=False)
+    hardware = HeadlessHardware()
+    engine = Engine(config, settings, store, hardware)
+    original = await finished_run(engine)
+    original_drive = engine.drives[0]
+
+    async def mounted():
+        return [replace(original_drive, mounted=True, eligible=False, reasons=["mounted"])]
+
+    monkeypatch.setattr(hardware, "discover", mounted)
+    with pytest.raises(ValueError, match="safe for an unmounted"):
+        await engine.retest(original["id"])
+    assert engine.queue.empty()
+    monkeypatch.undo()
+    settings.value["auto_test"] = True
+    hardware.present = False
+    for _ in range(AUTO_DETACH_SCANS):
+        await engine.scan()
+    hardware.present = True
+    response = await engine.retest(original["id"])
+    assert response["status"] == "queued"
+    assert len(store.runs()) == 2
+    assert engine.queue.qsize() == 1
+    store.close()
+
+
+async def test_late_manual_eject_updates_failed_report_and_queues_release_notice(tmp_path):
+    config, settings, store = configured(tmp_path, headless=False)
+    engine = Engine(config, settings, store, HeadlessHardware())
+    original = await finished_run(engine)
+    result = await engine.release(original["drive_id"], "eject")
+    assert result["status"] == "ejected"
+    saved = store.get(original["id"])
+    assert saved["status"] == "failed"
+    assert saved["lifecycle"]["eject_status"] == "ejected"
+    assert store.notice_state(f"{original['id']}:ready") is not None
+    store.close()
+
+
+async def test_retest_resolves_identity_after_device_path_changes(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    config, settings, store = configured(tmp_path, headless=False)
+    hardware = HeadlessHardware()
+    engine = Engine(config, settings, store, hardware)
+    original = await finished_run(engine)
+    original_drive = engine.drives[0]
+
+    async def reconnected():
+        return [replace(original_drive, path="/dev/demo-reconnected")]
+
+    monkeypatch.setattr(hardware, "discover", reconnected)
+    response = await engine.retest(original["id"])
+    assert response["run"]["drive"]["path"] == "/dev/demo-reconnected"
+    assert response["run"]["drive"]["identity"] == original["drive"]["identity"]
+    assert original["drive"]["path"] != "/dev/demo-reconnected"
+    store.close()
+
+
+async def test_failed_late_eject_never_queues_ready_to_remove(tmp_path):
+    class FailedEjectHardware(HeadlessHardware):
+        async def eject(self, drive):
+            return {"status": "failed", "detail": "Power-off was not confirmed."}
+
+    config, settings, store = configured(tmp_path, headless=False)
+    engine = Engine(config, settings, store, FailedEjectHardware())
+    original = await finished_run(engine)
+    response = await engine.release(original["drive_id"], "eject")
+    assert response["status"] == "failed"
+    assert store.get(original["id"])["lifecycle"]["eject_status"] == "failed"
+    assert store.notice_state(f"{original['id']}:ready") is None
+    store.close()
+
+
 async def test_notification_timeout_retains_outbox_but_still_ejects(tmp_path, monkeypatch):
     async def fail(settings, message, transport=None):
         raise notifications.NotificationError("offline")

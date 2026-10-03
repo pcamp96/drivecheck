@@ -250,7 +250,7 @@ class Engine:
                     for drive in self.drives:
                         if drive.eligible and drive.identity not in self.auto_attempted:
                             try:
-                                await self.enqueue(drive.id, "extended")
+                                await self.enqueue(drive.id, "extended", automatic=True)
                                 self.auto_attempted.add(drive.identity)
                                 self.auto_absent_scans[drive.identity] = 0
                             except (SafetyError, ValueError):
@@ -279,7 +279,9 @@ class Engine:
             await asyncio.sleep(self.config.scan_interval)
             await self.scan()
 
-    async def enqueue(self, drive_id: str, profile: str, confirmation: str = "") -> dict:
+    async def enqueue(
+        self, drive_id: str, profile: str, confirmation: str = "", *, automatic: bool = False
+    ) -> dict:
         if profile not in PROFILES:
             raise ValueError("Choose quick, extended, or verify")
         if getattr(self.config, "headless", False) and profile != "extended":
@@ -294,6 +296,8 @@ class Engine:
             drive = next((drive for drive in self.drives if drive.id == drive_id), None)
             if drive is None:
                 raise ValueError("Drive is no longer connected. Rescan and try again.")
+            if automatic and drive.identity in self.auto_attempted:
+                raise ValueError("This drive has already had its intake test")
             if any(
                 run["drive_id"] == drive_id
                 and (
@@ -337,6 +341,10 @@ class Engine:
                 },
             }
             self.store.save(run)
+            if profile != "verify":
+                # A manual read-only test or retry is also an intake attempt.
+                # Record it under the queue lock so discovery cannot race a retry.
+                self.auto_attempted.add(drive.identity)
             self.queue.put_nowait(run["id"])
             self.publish()
             return run
@@ -364,6 +372,41 @@ class Engine:
                 status="cancelled", finished_at=now(), detail="Cancelled before testing started"
             )
             self.record(run, run["detail"])
+
+    async def retest(self, run_id: str) -> dict:
+        original = self.store.get(run_id)
+        if original is None:
+            raise ValueError("Test not found")
+        if original["status"] not in TERMINAL or original.get("workflow_status") == "finishing":
+            raise ValueError("Wait for the current test and safe release to finish")
+        await self.scan()
+        if self.discovery_error:
+            raise ValueError(self.discovery_error)
+        identity = original["drive"]["identity"]
+        matches = [drive for drive in self.drives if drive.identity == identity]
+        if not matches:
+            return {
+                "status": "reconnect_required",
+                "detail": "Reconnect the drive or power-cycle its USB dock, then try again. "
+                "Safe eject removes the device; mounting a filesystem cannot reconnect it.",
+            }
+        if len(matches) != 1 or not matches[0].eligible:
+            raise ValueError(
+                "The drive is not uniquely identified and safe for an unmounted retest"
+            )
+        current = matches[0]
+        for pending in self.store.runs():
+            if pending["drive"]["identity"] == identity and (
+                pending["status"] in {"queued", "running"}
+                or pending.get("workflow_status") == "finishing"
+            ):
+                return {
+                    "status": pending["status"],
+                    "detail": "This drive already has a test or safe release in progress.",
+                    "run": pending,
+                }
+        queued = await self.enqueue(current.id, "extended")
+        return {"status": "queued", "detail": "Read-only extended retest queued.", "run": queued}
 
     async def release(self, drive_id: str, action: str) -> dict:
         if action not in {"unmount", "eject"}:
@@ -401,6 +444,29 @@ class Engine:
                         result = unmounted
                     else:
                         result = await self.hardware.eject(drive)
+                    completed = next(
+                        (
+                            item
+                            for item in self.store.runs()
+                            if item["drive"]["identity"] == drive.identity
+                            and item["status"] in TERMINAL
+                        ),
+                        None,
+                    )
+                    if completed is not None:
+                        completed.setdefault("lifecycle", {}).update(
+                            eject_status=result.get("status", "failed"),
+                            eject_detail=result.get(
+                                "detail", "Safe eject outcome was not reported."
+                            ),
+                        )
+                        self.record(completed, completed["lifecycle"]["eject_detail"])
+                        if result.get("status") == "ejected":
+                            self.notice(
+                                completed,
+                                "ready",
+                                notifications.run_message(completed, self.config.demo),
+                            )
             finally:
                 self.release_in_progress = False
                 self.publish()

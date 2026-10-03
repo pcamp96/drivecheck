@@ -259,6 +259,13 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
         except ValueError as error:
             raise HTTPException(404, str(error)) from None
 
+    @app.post("/api/runs/{run_id}/retest", dependencies=[Depends(authenticated)])
+    async def retest_run(run_id: str):
+        try:
+            return await engine().retest(run_id)
+        except (ValueError, SafetyError) as error:
+            raise HTTPException(409, str(error)) from None
+
     def get_run(run_id):
         run = engine().store.get(run_id)
         if run is None:
