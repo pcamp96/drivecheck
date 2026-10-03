@@ -45,6 +45,7 @@ def configured(tmp_path, *, headless=True, wait=0.5):
     config.notification_wait_seconds = wait
     config.prepare()
     settings = Settings(config)
+    settings.value["auto_eject_delay_seconds"] = 0
     settings.value["notifications"].update(
         provider="discord",
         enabled=True,
@@ -93,7 +94,7 @@ async def test_headless_delivers_then_unmounts_ejects_and_sends_ready(tmp_path, 
     try:
         await asyncio.wait_for(engine.queue.join(), 2)
         run = store.runs()[0]
-        assert run["profile"] == "extended"
+        assert run["profile"] == "quick"
         assert run["status"] == "passed"
         assert run["workflow_status"] == "complete"
         assert run["lifecycle"] == {
@@ -118,15 +119,15 @@ async def test_headless_delivers_then_unmounts_ejects_and_sends_ready(tmp_path, 
         store.close()
 
 
-async def test_failed_self_test_still_ejects_and_sends_failed_ready_notice(tmp_path, monkeypatch):
+async def test_failed_quick_smart_still_ejects_and_sends_failed_ready_notice(tmp_path, monkeypatch):
     delivered = []
 
     async def send(settings, message, transport=None, *, attachment=None):
         delivered.append(message)
 
     class FailedHardware(HeadlessHardware):
-        async def self_test(self, drive, progress):
-            return {"status": "failed", "detail": "Completed: read failure"}
+        async def smart(self, drive):
+            return {"health": "failed", "detail": "SMART reports failing health"}
 
     monkeypatch.setattr(notifications, "send", send)
     config, settings, store = configured(tmp_path)
@@ -314,7 +315,7 @@ async def test_cancelled_headless_test_never_auto_ejects(tmp_path, monkeypatch):
             super().__init__()
             self.entered = asyncio.Event()
 
-        async def self_test(self, drive, progress):
+        async def benchmark(self, drive, progress):
             self.entered.set()
             await asyncio.sleep(100)
 

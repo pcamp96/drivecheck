@@ -50,7 +50,7 @@ class Store:
                     "eject_detail": "",
                 },
             )
-            if run.get("workflow_status") == "finishing":
+            if run.get("workflow_status") in {"finishing", "awaiting_action"}:
                 run["workflow_status"] = "interrupted"
                 lifecycle["eject_status"] = "failed"
                 lifecycle["eject_detail"] = (

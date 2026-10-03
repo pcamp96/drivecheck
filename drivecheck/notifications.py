@@ -33,6 +33,9 @@ def validate_settings(settings: dict) -> None:
     chat = settings.get("telegram_chat_id", "")
     if chat and not re.fullmatch(r"-?\d+|@[A-Za-z0-9_]+", chat):
         raise ValueError("Enter a numeric Telegram chat ID or @channel name")
+    user_id = settings.get("telegram_user_id", "")
+    if user_id and not re.fullmatch(r"[1-9]\d*", str(user_id)):
+        raise ValueError("Enter a positive numeric Telegram user ID")
     if settings["enabled"]:
         if settings["provider"] == "none":
             raise ValueError("Choose a notification provider before enabling notifications")
@@ -43,12 +46,25 @@ def validate_settings(settings: dict) -> None:
 
 
 async def send(
-    settings: dict, message: str, transport=None, *, attachment: dict | None = None
+    settings: dict,
+    message: str,
+    transport=None,
+    *,
+    attachment: dict | None = None,
+    reply_markup: dict | None = None,
 ) -> None:
     validate_settings(settings)
     if not settings["enabled"] or settings["provider"] == "none":
         raise NotificationError("Notifications are disabled. Save an enabled provider first.")
     provider = settings["provider"]
+    markup_json = None
+    if provider == "telegram" and reply_markup is not None:
+        if not isinstance(reply_markup, dict):
+            raise NotificationError("The interactive message controls are invalid")
+        try:
+            markup_json = json.dumps(reply_markup, separators=(",", ":"))
+        except (TypeError, ValueError):
+            raise NotificationError("The interactive message controls are invalid") from None
     document = None
     if attachment is not None:
         filename = attachment.get("filename", "")
@@ -68,6 +84,8 @@ async def send(
             timeout=15, follow_redirects=False, transport=transport, trust_env=False
         ) as client:
             if provider == "discord":
+                # Discord delivery remains notification-only; Telegram keyboards
+                # have no equivalent authorization model here.
                 payload = {"content": message[:1900], "allowed_mentions": {"parse": []}}
                 if document is not None:
                     response = await client.post(
@@ -84,15 +102,21 @@ async def send(
                     )
             else:
                 if document is not None:
+                    data = {"chat_id": settings["telegram_chat_id"], "caption": message[:1000]}
+                    if markup_json is not None:
+                        data["reply_markup"] = markup_json
                     response = await client.post(
                         f"https://api.telegram.org/bot{settings['telegram_token']}/sendDocument",
-                        data={"chat_id": settings["telegram_chat_id"], "caption": message[:1000]},
+                        data=data,
                         files={"document": document},
                     )
                 else:
+                    payload = {"chat_id": settings["telegram_chat_id"], "text": message[:4000]}
+                    if reply_markup is not None:
+                        payload["reply_markup"] = reply_markup
                     response = await client.post(
                         f"https://api.telegram.org/bot{settings['telegram_token']}/sendMessage",
-                        json={"chat_id": settings["telegram_chat_id"], "text": message[:4000]},
+                        json=payload,
                     )
             if response.status_code == 429:
                 raise NotificationError(f"{provider.title()} rate limit reached. Try again later")

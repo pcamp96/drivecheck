@@ -45,6 +45,38 @@ async def test_telegram_payload_and_application_failure():
     assert "secret" not in str(error.value)
 
 
+async def test_telegram_reply_markup_is_sent_and_discord_ignores_it():
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "Test again", "callback_data": "dc:" + "a" * 32 + ":extended"}]
+        ]
+    }
+    captured = []
+
+    def handler(request):
+        captured.append(request)
+        if request.url.path.endswith("/sendMessage"):
+            assert json.loads(request.content)["reply_markup"] == keyboard
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+        payload = json.loads(request.content)
+        assert "reply_markup" not in payload
+        return httpx.Response(200, json={"id": "message"})
+
+    transport = httpx.MockTransport(handler)
+    await send(setting("telegram"), "Failed", transport, reply_markup=keyboard)
+    await send(setting("discord"), "Failed", transport, reply_markup=keyboard)
+    assert len(captured) == 2
+
+
+def test_telegram_user_id_must_be_positive_numeric():
+    from drivecheck.notifications import validate_settings
+
+    settings = setting("telegram")
+    settings["telegram_user_id"] = "@owner"
+    with pytest.raises(ValueError, match="positive numeric"):
+        validate_settings(settings)
+
+
 @pytest.mark.parametrize("status", [401, 403, 429, 500])
 async def test_provider_http_failures_safe_and_retryable(status):
     def handler(request):
@@ -70,6 +102,9 @@ async def test_readable_attachment_and_reason_delivered_in_one_request(provider)
     captured = []
     report = "DriveCheck report\nWhy it failed: read failure at LBA 622,728.\n"
     caption = "DriveCheck: failed\nWhy it failed: drive could not read its surface."
+    keyboard = {
+        "inline_keyboard": [[{"text": "Eject", "callback_data": "dc:" + "b" * 32 + ":eject"}]]
+    }
 
     def handler(request):
         captured.append(request)
@@ -86,6 +121,7 @@ async def test_readable_attachment_and_reason_delivered_in_one_request(provider)
             assert request.url.path.endswith("/sendDocument")
             assert parts["caption"].get_payload(decode=True).decode() == caption
             assert parts["chat_id"].get_payload(decode=True).decode() == "-987"
+            assert json.loads(parts["reply_markup"].get_payload(decode=True)) == keyboard
             assert "parse_mode" not in parts
             return httpx.Response(
                 200, json={"ok": True, "result": {"document": {"file_name": "drivecheck-test.txt"}}}
@@ -103,6 +139,7 @@ async def test_readable_attachment_and_reason_delivered_in_one_request(provider)
         caption,
         httpx.MockTransport(handler),
         attachment={"filename": "drivecheck-test.txt", "text": report},
+        reply_markup=keyboard,
     )
     assert len(captured) == 1
 

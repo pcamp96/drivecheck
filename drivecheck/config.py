@@ -47,6 +47,7 @@ class Config:
                 "discord_webhook": os.getenv("DRIVECHECK_DISCORD_WEBHOOK", ""),
                 "telegram_token": os.getenv("DRIVECHECK_TELEGRAM_TOKEN", ""),
                 "telegram_chat_id": os.getenv("DRIVECHECK_TELEGRAM_CHAT_ID", ""),
+                "telegram_user_id": os.getenv("DRIVECHECK_TELEGRAM_USER_ID", ""),
                 "notify_started": boolean(os.getenv("DRIVECHECK_NOTIFY_STARTED")),
                 "notify_ready": boolean(os.getenv("DRIVECHECK_NOTIFY_READY"), True),
             }
@@ -85,12 +86,14 @@ class Config:
 DEFAULT_SETTINGS = {
     "auto_test": False,
     "auto_eject": False,
+    "auto_eject_delay_seconds": 180,
     "notifications": {
         "provider": "none",
         "enabled": False,
         "discord_webhook": "",
         "telegram_token": "",
         "telegram_chat_id": "",
+        "telegram_user_id": "",
         "notify_started": False,
         "notify_ready": True,
     },
@@ -106,6 +109,7 @@ class Settings:
             saved = json.loads(self.path.read_text())
             self.value["auto_test"] = bool(saved.get("auto_test", False))
             self.value["auto_eject"] = bool(saved.get("auto_eject", False))
+            self.value["auto_eject_delay_seconds"] = saved.get("auto_eject_delay_seconds", 180)
             self.value["notifications"].update(saved.get("notifications", {}))
         if config.notification_env is not None:
             self.value["notifications"].update(config.notification_env)
@@ -139,6 +143,11 @@ class Settings:
                 if self.config.headless and not patch[key]:
                     raise ValueError("Headless mode requires automatic testing and safe eject")
                 value[key] = patch[key]
+        if "auto_eject_delay_seconds" in patch:
+            delay = patch["auto_eject_delay_seconds"]
+            if type(delay) is not int or not 0 <= delay <= 3600:
+                raise ValueError("Choose an eject delay from 0 to 3600 seconds")
+            value["auto_eject_delay_seconds"] = delay
         if patch.get("notifications") and self.config.notification_env is not None:
             raise ValueError(
                 "Notifications are managed by the station environment; edit its configuration and restart"
@@ -155,6 +164,7 @@ class Settings:
         if patch.get("notifications", {}).get("clear_telegram"):
             notice["telegram_token"] = ""
             notice["telegram_chat_id"] = ""
+            notice["telegram_user_id"] = ""
         from drivecheck.notifications import validate_settings
 
         validate_settings(notice)

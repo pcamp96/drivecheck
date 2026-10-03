@@ -50,3 +50,13 @@ def test_invalid_environment_provider_fails_without_exposing_credentials(tmp_pat
     with pytest.raises(ValueError) as error:
         Settings(config)
     assert "secret" not in str(error.value)
+
+
+def test_quick_action_delay_is_default_persisted_and_bounded(tmp_path):
+    settings = Settings(Config(tmp_path))
+    assert settings.public()["auto_eject_delay_seconds"] == 180
+    settings.update({"auto_eject_delay_seconds": 90})
+    assert Settings(Config(tmp_path)).public()["auto_eject_delay_seconds"] == 90
+    for bad in (-1, 3601, True, "180"):
+        with pytest.raises(ValueError, match="delay"):
+            settings.update({"auto_eject_delay_seconds": bad})
