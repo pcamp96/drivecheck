@@ -1,11 +1,13 @@
 [Unit]
 Description=DriveCheck drive intake station
-After=network.target
+After=network.target udisks2.service
+Wants=udisks2.service
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/opt/drivecheck
+Environment="PATH=/opt/drivecheck/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 EnvironmentFile=/etc/drivecheck/drivecheck.env
 ExecStart=/opt/drivecheck/.venv/bin/drivecheck --hardware
 Restart=on-failure

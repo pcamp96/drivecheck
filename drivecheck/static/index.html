@@ -112,6 +112,7 @@
         <div class="section-heading">
           <div><h2 id="drives-title">Drive inventory</h2><p>Testing is read-only unless you explicitly arm a full-drive verification.</p></div>
         </div>
+        <p class="platform-notice" id="platform-notice" role="status"></p>
         <div class="drive-list" id="drive-list"></div>
         <div class="empty-state" id="drives-empty" hidden><strong>No drives detected</strong><span>Connect a drive through a powered SATA adapter, then scan again.</span></div>
       </section>
@@ -136,6 +137,8 @@
           <fieldset>
             <legend>Automation</legend>
             <label class="switch-row" for="auto-test"><span><strong>Test new drives automatically</strong><small>Starts the safe extended profile when an eligible drive appears.</small></span><input type="checkbox" id="auto-test"><i aria-hidden="true"></i></label>
+            <label class="switch-row" for="auto-eject"><span><strong>Safely eject after testing</strong><small>Waits for the result message, then releases the drive. Headless mode requires this.</small></span><input type="checkbox" id="auto-eject"><i aria-hidden="true"></i></label>
+            <p class="configured-note" id="automation-note"></p>
             <div class="read-only-settings"><span>Destructive verification</span><strong id="destructive-setting">Disabled</strong><span>Hardware access</span><strong id="hardware-setting">—</strong></div>
           </fieldset>
           <fieldset>

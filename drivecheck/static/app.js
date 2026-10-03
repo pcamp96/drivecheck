@@ -11,6 +11,7 @@ const elements = {
   activePercent: $("#active-percent"), progressBar: $("#progress-bar"), activeDetail: $("#active-detail"),
   phaseTrack: $("#phase-track"), cancelButton: $("#cancel-button"), runList: $("#run-list"),
   report: $("#report"), settingsForm: $("#settings-form"), autoTest: $("#auto-test"),
+  autoEject: $("#auto-eject"), automationNote: $("#automation-note"), platformNotice: $("#platform-notice"),
   notificationsEnabled: $("#notifications-enabled"), provider: $("#notification-provider"),
   discordFields: $("#discord-fields"), discordWebhook: $("#discord-webhook"),
   discordConfigured: $("#discord-configured"), forgetDiscord: $("#forget-discord"),
@@ -164,7 +165,9 @@ function applySnapshot(next) {
 
 function renderStation() {
   const isDemo = snapshot.mode === "demo";
-  elements.mode.textContent = isDemo ? "Simulated drives · no hardware access" : "Hardware mode";
+  const capabilities = snapshot.system?.capabilities || {};
+  elements.mode.textContent = isDemo ? "Simulated drives · no hardware access" : `${snapshot.system?.platform || "Hardware"} · ${snapshot.settings?.headless ? "Headless intake" : "Hardware mode"}`;
+  elements.platformNotice.textContent = isDemo ? "This preview uses simulated drives. Start with --hardware to discover attached external drives." : (capabilities.limitations || []).join(" ");
   elements.mode.classList.toggle("demo", isDemo);
   elements.connection.replaceChildren();
   const dot = document.createElement("span");
@@ -221,10 +224,12 @@ function renderActive() {
 
 function renderDrives() {
   const drives = snapshot.drives || [];
-  const busy = Boolean(activeRun());
+  const busy = Boolean(activeRun()) || Boolean(snapshot.system?.release_in_progress);
+  const capabilities = snapshot.system?.capabilities || {};
   const signature = JSON.stringify({
     busy,
     allowDestructive: Boolean(snapshot.settings?.allow_destructive),
+    capabilities: snapshot.system?.capabilities,
     drives: drives.map((drive) => ({
       id: drive.id, path: drive.path, model: drive.model, serial: drive.serial,
       size_bytes: drive.size_bytes, transport: drive.transport, eligible: drive.eligible,
@@ -256,10 +261,12 @@ function renderDrives() {
     const actions = document.createElement("div");
     actions.className = "drive-actions";
     actions.append(
-      runButton("Quick test", drive, "quick", busy),
-      runButton("Extended test", drive, "extended", busy),
-      runButton("Erase + verify", drive, "verify", busy || !snapshot.settings?.allow_destructive, true)
+      runButton("Quick test", drive, "quick", busy || capabilities.can_test === false),
+      runButton("Extended test", drive, "extended", busy || capabilities.can_test === false),
+      runButton("Erase + verify", drive, "verify", busy || !snapshot.settings?.allow_destructive || capabilities.can_verify === false, true)
     );
+    if (drive.mounted && capabilities.can_unmount) actions.append(releaseButton("Unmount for testing", drive, "unmount", busy));
+    if (!drive.mounted && drive.eligible && capabilities.can_eject) actions.append(releaseButton("Eject drive", drive, "eject", busy));
     const help = textNode("p", "Quick: SMART snapshots + read benchmark. Extended: adds a long self-test + full read scan. Erase + verify: destructive full-drive write/read checks.", "profile-help");
     card.append(main, capacity, connection, state, actions, help);
     elements.driveList.append(card);
@@ -279,6 +286,23 @@ function runButton(label, drive, profile, extraDisabled, destructive = false) {
   button.disabled = !drive.eligible || extraDisabled;
   if (destructive && !snapshot.settings?.allow_destructive) button.title = "Destructive verification is disabled in the station configuration.";
   button.addEventListener("click", () => destructive ? openVerify(drive) : startRun(drive, profile));
+  return button;
+}
+
+function releaseButton(label, drive, action, busy) {
+  const button = textNode("button", label, "quiet-button");
+  button.type = "button";
+  button.disabled = busy;
+  button.dataset.driveId = drive.id;
+  button.dataset.profile = action;
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const result = await api(`/api/drives/${encodeURIComponent(drive.id)}/${action}`, { method: "POST" });
+      toast(result.detail); await refreshState();
+    } catch (error) { showError(error.message); toast(error.message, "error"); }
+    finally { button.disabled = busy; }
+  });
   return button;
 }
 
@@ -370,6 +394,11 @@ function renderReport(run) {
   });
   elements.report.append(header, summary);
   if (run.detail) elements.report.append(textNode("p", run.detail));
+  if (run.lifecycle) {
+    const life = run.lifecycle;
+    elements.report.append(textNode("p", `Notification: ${life.notification_status || "not requested"} · Eject: ${life.eject_status || "not requested"}`, "configured-note"));
+    if (life.eject_detail) elements.report.append(textNode("p", life.eject_detail));
+  }
   elements.report.append(results);
   if (run.logs?.length) {
     elements.report.append(textNode("h4", "Run log"));
@@ -384,6 +413,13 @@ function renderSettings(force = false) {
   const settings = snapshot.settings || {};
   const notifications = settings.notifications || {};
   elements.autoTest.checked = Boolean(settings.auto_test);
+  elements.autoEject.checked = Boolean(settings.auto_eject);
+  elements.autoTest.disabled = Boolean(settings.headless);
+  elements.autoEject.disabled = Boolean(settings.headless);
+  elements.automationNote.textContent = settings.headless ? "Headless mode: dock → read-only extended test → message → safe eject." : "Automatic intake only starts for unmounted external drives with a unique identity.";
+  const managed = Boolean(settings.notifications_from_env);
+  [elements.notificationsEnabled, elements.provider, elements.discordWebhook, elements.telegramToken, elements.telegramChat, elements.notifyStarted, elements.forgetDiscord, elements.forgetTelegram].forEach((field) => { field.disabled = managed; });
+  if (managed) elements.automationNote.textContent += " Notifications are managed by the station environment.";
   elements.notificationsEnabled.checked = Boolean(notifications.enabled);
   elements.provider.value = notifications.provider || "none";
   elements.notifyStarted.checked = Boolean(notifications.notify_started);
@@ -395,7 +431,7 @@ function renderSettings(force = false) {
   elements.forgetDiscord.hidden = !notifications.discord_configured;
   elements.forgetTelegram.hidden = !notifications.telegram_configured;
   elements.destructiveSetting.textContent = settings.allow_destructive ? "Enabled" : "Disabled";
-  elements.hardwareSetting.textContent = snapshot.mode === "demo" ? "Simulated only" : "Enabled";
+  elements.hardwareSetting.textContent = snapshot.mode === "demo" ? "Simulated only" : (snapshot.system?.capabilities?.can_test ? "Testing enabled" : "Inventory only");
   showProviderFields();
 }
 
@@ -496,7 +532,7 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     notify_started: elements.notifyStarted.checked
   };
   try {
-    await api("/api/settings", { method: "PUT", body: { auto_test: elements.autoTest.checked, notifications: notificationSettings } });
+    await api("/api/settings", { method: "PUT", body: { auto_test: elements.autoTest.checked, auto_eject: elements.autoEject.checked, ...(snapshot.settings?.notifications_from_env ? {} : { notifications: notificationSettings }) } });
     settingsDirty = false; elements.settingsStatus.textContent = "Settings saved.";
     await refreshState(); renderSettings(true); toast("Settings saved.");
   } catch (error) { elements.settingsStatus.textContent = error.message; toast(error.message, "error"); }

@@ -7,7 +7,10 @@ One application process; one test job at a time; SQLite persists snapshots.
 ## Hardware interface (hardware.py)
 `Drive` is a dataclass with fields: id, path, model, serial, size_bytes,
 transport, eligible, reasons (list[str]), identity (str), mounted (bool).
-`drive.to_dict()` returns all fields. `Hardware(demo: bool)`:
+`drive.to_dict()` returns all fields. `get_hardware(demo)` selects demo/Linux
+`Hardware` or Darwin `MacHardware`. The adapters provide:
+- `capabilities()` exposes platform, tools, test/verify/unmount/eject permissions and limitations.
+- async `unmount(drive)` and `eject(drive)` return status/detail after fresh safety checks.
 - async `discover() -> list[Drive]`
 - async `validate(drive: Drive, destructive: bool = False) -> Drive`
   returns fresh matching device or raises SafetyError. Recheck before every phase.
@@ -40,21 +43,24 @@ return the same full snapshot:
  mode: "demo"|"hardware", version: "0.1.0", connected: true,
  drives: [Drive + {last_run: run|null}],
  runs: [run newest first, including active/queued],
- settings: {auto_test, notifications: {provider: "none"|"discord"|"telegram",
+ settings: {auto_test, auto_eject, headless, notifications_from_env, notifications: {provider: "none"|"discord"|"telegram",
  enabled, discord_configured, telegram_configured, discord_webhook: "",
  telegram_token: "", telegram_chat_id, notify_started}},
- system: {active_run_id, discovery_error, tools: {}, notification_error}
+ system: {active_run_id, platform, capabilities: {}, release_in_progress, discovery_error, tools: {}, notification_error}
 }
 ```
 run: `{id, drive_id, drive: Drive, profile: "quick"|"extended"|"verify",
 status: "queued"|"running"|"passed"|"warning"|"failed"|"incomplete"|"cancelled",
 phase, progress:0..100, detail, created_at, started_at, finished_at,
-results: {smart_before, self_test, benchmark, surface, smart_after}, logs:[{time,message}]}`.
+results: {smart_before, self_test, benchmark, surface, smart_after}, logs:[{time,message}],
+workflow_status: "testing"|"finishing"|"complete"|"interrupted",
+lifecycle: {notification_status, eject_status, eject_detail}}`.
 - `POST /api/runs`: `{drive_id, profile, confirmation?: "ERASE <serial>"}`.
   `verify` requires config allow_destructive and exact serial confirmation.
+- `POST /api/drives/{id}/unmount` or `/eject`: refuse queued/running/finishing work; no forced unmount.
 - `POST /api/runs/{id}/cancel`
 - `GET /api/runs/{id}`; `GET /api/runs/{id}/report` downloads JSON
-- `PUT /api/settings` with {auto_test, notifications:{...}};
+- `PUT /api/settings` with {auto_test, auto_eject, notifications:{...}};
   omitted or blank secrets preserve existing values; provider selection configurable.
 - `POST /api/notifications/test`: explicitly sends a test to configured provider.
 - `POST /api/scan`: rescan devices
@@ -68,3 +74,18 @@ cobalt #235ed6, amber #a75a09, muted teal #167268. System sans (human labels)
 with monospace only for serials/raw logs. Left aligned layout: narrow station
 sidebar, prominent active-test lane with phase steps, drive inventory/table and
 expandable history report. Mobile stacks; clear demo label, no misleading claims.
+
+## Headless completion lifecycle
+A terminal scan verdict is independent of release status. Finishing remains busy
+until the result delivery wait and safe eject attempt complete. SQLite records
+outbox delivery status and a separate confirmed-release notification. Startup
+recovery marks interrupted release without retrying commands against a possibly
+replaced device. Headless enforces auto-test/eject and a configured provider;
+notification environment overrides are never returned to clients. Auto intake
+requires eligibility and observed detach before repeat work.
+
+macOS inventory uses diskutil plists and IORegistry identity. Read tests use the
+raw character device and a portable fio engine. It continuously checks identity
+and mount state, without Linux's O_EXCL mount exclusion; destructive verification
+is disabled. Normal diskutil unmount/eject is allowed only on fresh matching
+external devices. Linux release refuses a shared/unknown USB power-off scope.

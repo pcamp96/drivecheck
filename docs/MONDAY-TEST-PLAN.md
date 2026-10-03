@@ -39,3 +39,22 @@ intake test does not replace backups or ongoing monitoring.
 
 Report bugs with the run ID, exported JSON, service log excerpt, OS/tool versions,
 and adapter model. Exclude tokens, notification settings, and private account data.
+
+## Headless and macOS acceptance
+
+- On macOS, launch inventory mode as your normal user. Confirm the actual external
+  drive identity, capacity and mounted state; missing tools/root must be explained.
+  Relaunch as root with fio/smartctl installed. Use a spare drive, unmount normally,
+  run Quick and then Extended, and verify original files after remounting.
+  Unsupported USB SMART must leave coverage incomplete. Writes must stay disabled.
+- On the Pi, use a single-bay dock and configure an enabled provider, then enable
+  headless mode. Close the dashboard. Dock an unmounted spare drive and confirm
+  one read-only Extended test, a result message, safe power-off, and a separate
+  ready-to-remove message. Verify report lifecycle matches actual hardware state.
+- Repeat with notification delivery temporarily unavailable: the report is saved,
+  delivery stays queued and eject proceeds after the bounded wait. Restore network
+  and confirm eventual notices without false readiness.
+- Use a busy mounted volume and a multi-bay dock: automatic testing or unsafe
+  shared power-off must be refused. Confirm a cancelled test is not auto-ejected.
+- Restart during finishing: it must report interrupted release, never issue an
+  unverified readiness message or eject a replacement device.

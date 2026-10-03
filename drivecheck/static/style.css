@@ -268,3 +268,5 @@ dialog code { padding: 2px 4px; color: #821d14; background: var(--red-soft); bor
   html { scroll-behavior: auto; }
   *, *::before, *::after { transition-duration: .01ms !important; }
 }
+
+.platform-notice { color: var(--muted, #526783); line-height: 1.6; margin: 0 0 18px; }

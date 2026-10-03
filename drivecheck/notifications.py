@@ -90,5 +90,12 @@ def run_message(run: dict, demo: bool = False) -> str:
     ]
     if speed is not None:
         lines.append(f"Sequential read: {speed:.1f} MB/s")
+    lifecycle = run.get("lifecycle", {})
+    if lifecycle.get("eject_status") == "ejected":
+        lines.append("Drive safely ejected; ready to remove.")
+    elif lifecycle.get("eject_status") == "pending":
+        lines.append("Safe eject pending. Wait for the release confirmation before removal.")
+    elif lifecycle.get("eject_status") in {"failed", "unsupported"}:
+        lines.append("Safe eject was not confirmed. Check the station before removal.")
     lines.append(f"Run: {run['id']}")
     return "\n".join(lines)

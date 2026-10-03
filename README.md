@@ -1,6 +1,6 @@
 # DriveCheck
 
-A dedicated hard-drive intake station for Raspberry Pi. Connect an unmounted
+A hard-drive intake station for Raspberry Pi, with read-only hardware support on macOS. Connect an unmounted
 USB drive, run a repeatable set of checks, and review a live dashboard and saved
 report before putting the drive into service. Configurable Discord or Telegram
 notifications deliver the outcome. Built for a single station, one drive test at
@@ -26,6 +26,36 @@ inspects or reads host devices. A demo notification is a **real message** if you
 configure a provider and press Send test notification or enable test notices.
 All demo notifications and downloaded reports are labelled as simulated.
 
+## Connected drives on macOS
+
+The default preview is simulated. Use hardware mode to discover actual external
+physical disks, including their mounted volumes:
+
+```sh
+cd ~/development/drivecheck
+uv run drivecheck --hardware --data-dir data/macos
+```
+
+This works without root for inventory. The dashboard explains missing tools and
+permissions. Install the real I/O tools with `brew install fio smartmontools`.
+Stop the inventory process, then launch the existing virtual environment as root
+to run raw read tests (use a separate private data directory):
+
+```sh
+sudo "$PWD/.venv/bin/drivecheck" --hardware --data-dir /var/db/drivecheck
+```
+
+Sign in with `/var/db/drivecheck/access-token`. Close files/apps using the target,
+then select **Unmount for testing**. This uses normal macOS unmounting and refuses
+busy volumes. Quick and Extended read the raw disk; they never write test data.
+macOS write verification is disabled because the Linux exclusive block claim is
+not available. Mount state and identity are checked throughout read I/O, but
+macOS cannot provide that Linux mount exclusion guarantee. Use a dedicated test
+dock and avoid mounting the disk during a run. USB SMART passthrough varies by
+bridge/driver; unsupported health/self-test checks produce incomplete reports.
+Eject uses `diskutil eject`. Internal, system-backed, virtual, ambiguous, or
+unidentified disks are blocked. Windows currently supports simulation only.
+
 ## Install on the Pi
 
 Use Raspberry Pi OS Bookworm or newer, **64-bit**, Python 3.11+, a Pi 4/5 and a
@@ -41,7 +71,7 @@ sudo cat /var/lib/drivecheck/access-token
 ```
 
 The installer installs Debian's `fio` (Flexible I/O Tester), `smartmontools`, and
-`util-linux`, installs the locked Python dependencies, and creates a systemd
+`util-linux` and `udisks2`, installs the locked Python dependencies, and creates a systemd
 service. It preserves existing station settings when rerun. Stop the service
 before updating the installed application. It runs as root because raw block
 I/O and SMART ioctls need device permissions. Its web listener defaults to
@@ -59,6 +89,49 @@ not forward the service port to the internet. For a TLS reverse proxy set
 `DRIVECHECK_PUBLIC_ORIGIN` to its exact HTTPS origin and
 `DRIVECHECK_SECURE_COOKIE=true`; the app does not trust forwarded headers.
 
+## Completely headless Pi intake
+
+After installation, either configure notifications once in the dashboard or put
+your provider credentials into the protected service environment file:
+
+```sh
+sudo nano /etc/drivecheck/drivecheck.env
+```
+
+For Discord, add `DRIVECHECK_NOTIFICATION_PROVIDER=discord` and
+`DRIVECHECK_DISCORD_WEBHOOK=<your webhook URL>`. For Telegram, use
+`DRIVECHECK_NOTIFICATION_PROVIDER=telegram`, `DRIVECHECK_TELEGRAM_TOKEN=<bot token>`,
+and `DRIVECHECK_TELEGRAM_CHAT_ID=<chat ID>`. Set `DRIVECHECK_HEADLESS=true`, then:
+
+```sh
+sudo systemctl restart drivecheck
+sudo journalctl -u drivecheck -f
+```
+
+No browser, monitor, or keyboard is needed afterward. Dock an eligible, unmounted
+USB drive: the service runs Extended read-only checks, saves the report, queues
+the result message, waits up to 30 seconds for delivery, then safely powers off
+the drive through UDisks. A second message says **ready to remove** only after
+release is confirmed. The dashboard remains available for observation.
+Headless mode requires tools, raw I/O permissions, and a valid enabled provider
+at startup. It forces automatic testing and eject; write tests stay manual.
+Keep desktop automount disabled on this dedicated Pi. Mounted drives remain
+blocked; the unattended station never automatically unmounts your filesystems.
+
+If the network is down, the report and message stay queued; eject still proceeds
+after the bounded delivery wait. Notification and eject outcomes are recorded
+separately from the test verdict. Failed or unsupported eject never produces a
+ready-to-remove confirmation. Cancellation does not automatically eject. An
+interrupted post-test release is recorded and never blindly resumed on restart.
+An already tested drive isn't repeatedly scanned while it remains connected;
+the station must observe a detach before automatic retesting.
+
+Use a single-drive USB dock for unattended power-off. UDisks may affect sibling
+drives sharing one bridge; DriveCheck refuses power-off when it cannot establish
+an isolated device. Physically verify the dock's behavior before relying on it.
+Environment-managed provider settings are read-only in the dashboard. Without
+provider environment variables, stored dashboard settings remain configurable.
+
 ## Profiles and automatic intake
 
 | Profile | Checks | Drive writes |
@@ -74,12 +147,12 @@ already-recorded drives aren't automatically retested; run a manual test or
 unplug/reconnect to retry. Unplugging and reconnecting between discovery polls
 may not be observed; use a manual test in that case.
 
-Eligibility is conservative: only unmounted USB disks with a unique serial and
+Eligibility is conservative: only unmounted external disks (USB on Linux) with a unique serial and
 valid capacity are accepted. System storage, mounted partitions, active swap,
 internal disks, missing serials and duplicate bridge identities are blocked.
 Disable desktop automount on the Pi; run the service on a dedicated station.
 Review the identity and capacity before starting a test. All phases recheck
-identity; an exclusive block-device claim prevents a new mount during raw I/O.
+identity; on Linux an exclusive block-device claim prevents a new mount during raw I/O.
 A disconnect or changed identity stops the test as incomplete.
 A raw full-drive write destroys partitions and files. It is never auto-triggered.
 
@@ -161,6 +234,8 @@ See [Monday's test plan](docs/MONDAY-TEST-PLAN.md),
 ## Primary references
 
 - [smartctl manual source](https://github.com/smartmontools/smartmontools/blob/master/smartmontools/smartctl.8.in)
+- [UDisks safe power-off](https://storaged.org/doc/udisks2-api/latest/udisksctl.1.html)
+- [macOS diskutil manual](https://keith.github.io/xcode-man-pages/diskutil.8.html)
 - [fio documentation](https://fio.readthedocs.io/en/latest/fio_doc.html)
 - [Raspberry Pi USB and power documentation](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html)
 - [FastAPI application lifespan](https://fastapi.tiangolo.com/advanced/events/)

@@ -11,7 +11,7 @@ if systemctl is-active --quiet drivecheck; then
 fi
 python3 -c 'import sys; assert sys.version_info >= (3,11), "Python 3.11+ required (Pi OS Bookworm or newer)"'
 apt-get update
-apt-get install -y python3-venv python3-pip smartmontools fio util-linux
+apt-get install -y python3-venv python3-pip smartmontools fio util-linux udisks2
 install -d -m 755 /opt/drivecheck /etc/drivecheck
 install -d -m 700 /var/lib/drivecheck
 cp -R "$source_dir/drivecheck" /opt/drivecheck/
@@ -28,4 +28,5 @@ systemctl enable --now drivecheck
 printf '\nDriveCheck installed. Inspect status with: sudo systemctl status drivecheck\n'
 printf 'Read sign-in token with: sudo cat /var/lib/drivecheck/access-token\n'
 printf 'Forward dashboard: ssh -L 8765:127.0.0.1:8765 USER@PI\n'
+printf 'Headless: configure provider and DRIVECHECK_HEADLESS=true in /etc/drivecheck/drivecheck.env, then restart.\n'
 printf 'Then open http://127.0.0.1:8765 on your computer.\n'

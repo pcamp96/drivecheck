@@ -16,23 +16,29 @@ def main():
     mode.add_argument(
         "--demo", action="store_true", help="Simulated devices; never inspect host disks"
     )
-    mode.add_argument("--hardware", action="store_true", help="Use real Linux USB drives")
+    mode.add_argument(
+        "--hardware", action="store_true", help="Discover real external drives on Linux or macOS"
+    )
     parser.add_argument("--host", default=os.getenv("DRIVECHECK_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("DRIVECHECK_PORT", "8765")))
     parser.add_argument("--data-dir", type=Path)
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Automatically test, notify, and safely eject eligible drives",
+    )
     args = parser.parse_args()
     config = Config.from_env()
     if args.demo or args.hardware:
         config.demo = not args.hardware
     if args.data_dir:
         config.data_dir = args.data_dir.expanduser().resolve()
-    if not config.demo:
-        if platform.system() != "Linux":
-            parser.error("Hardware mode requires Linux. Use --demo on this computer.")
-        if os.geteuid() != 0:
-            parser.error(
-                "Hardware mode requires root for drive self-tests and raw I/O. Use the systemd installer on your Pi."
-            )
+    if args.headless:
+        config.headless = True
+    if config.headless and config.demo:
+        parser.error("Headless mode requires --hardware (or DRIVECHECK_DEMO=false)")
+    if not config.demo and platform.system() not in {"Linux", "Darwin"}:
+        parser.error("Hardware mode supports Linux and macOS. Use --demo on this computer.")
     from drivecheck.app import create_app
 
     app = create_app(config)

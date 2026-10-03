@@ -51,6 +51,7 @@ class NotificationInput(Input):
 
 class SettingsInput(Input):
     auto_test: bool | None = None
+    auto_eject: bool | None = None
     notifications: NotificationInput | None = None
 
 
@@ -71,13 +72,15 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
                 "Another DriveCheck process is using this data directory. Use one worker."
             ) from None
         store = Store(config.data_dir / "drivecheck.sqlite3")
-        engine = Engine(config, Settings(config), store, hardware)
-        app.state.engine = engine
+        engine = None
         try:
+            engine = Engine(config, Settings(config), store, hardware)
+            app.state.engine = engine
             await engine.start()
             yield
         finally:
-            await engine.stop()
+            if engine is not None:
+                await engine.stop()
             store.close()
             fcntl.flock(lock, fcntl.LOCK_UN)
             lock.close()
@@ -229,6 +232,16 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
     async def scan():
         await engine().scan()
         return engine().state()
+
+    @app.post("/api/drives/{drive_id}/{action}", dependencies=[Depends(authenticated)])
+    async def release_drive(drive_id: str, action: Literal["unmount", "eject"]):
+        try:
+            result = await engine().release(drive_id, action)
+            if result["status"] in {"failed", "unsupported"}:
+                raise HTTPException(409, result["detail"])
+            return result
+        except (ValueError, SafetyError) as error:
+            raise HTTPException(409, str(error)) from None
 
     @app.post("/api/runs", dependencies=[Depends(authenticated)])
     async def start_run(body: RunInput):
