@@ -20,12 +20,16 @@ esac
 
 # Used only by fixture tests; production installations always have no prefix.
 install_root=${DRIVECHECK_TEST_ROOT:-}
+while [[ -n "$install_root" && "$install_root" != / && "$install_root" == */ ]]; do
+  install_root=${install_root%/}
+done
 if [[ -z "$install_root" ]]; then
   if [[ $(uname -s) != Linux || $EUID -ne 0 ]]; then
     echo "Run this installer with sudo on Debian or Ubuntu Linux." >&2
     exit 1
   fi
-elif [[ ${DRIVECHECK_INSTALL_TESTING:-} != 1 || "$install_root" != /* ]]; then
+elif [[ ${DRIVECHECK_INSTALL_TESTING:-} != 1 || "$install_root" != /* || \
+        "$install_root" == / || -L "$install_root" ]]; then
   echo "DRIVECHECK_TEST_ROOT is reserved for isolated installer tests." >&2
   exit 1
 fi
@@ -109,7 +113,7 @@ done
 
 smart_package_new=false
 smart_units_preexisting=false
-if [[ " ${missing[*]} " == *" smartmontools "* ]]; then
+if [[ " ${missing[*]-} " == *" smartmontools "* ]]; then
   smart_package_new=true
 fi
 for unit in smartmontools.service smartd.service; do
@@ -126,11 +130,17 @@ fi
 # smartmontools may start smartd. Disable only a daemon introduced by this
 # installation; a daemon/unit that existed beforehand is never stopped.
 if [[ "$smart_package_new" == true && "$smart_units_preexisting" == false ]]; then
+  smart_unit=
   for unit in smartmontools.service smartd.service; do
     if systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q "^$unit"; then
-      systemctl disable --now "$unit"
+      smart_unit=$(systemctl show --property=Id --value "$unit")
+      smart_unit=${smart_unit:-$unit}
+      break
     fi
   done
+  if [[ -n "$smart_unit" ]]; then
+    systemctl disable --now "$smart_unit"
+  fi
 fi
 
 if systemctl is-active --quiet drivecheck.service; then
@@ -139,6 +149,15 @@ fi
 
 install -d -m 755 "$app_dir" "$config_dir" "$(dirname -- "$unit_path")" "$(dirname -- "$uninstall_path")"
 install -d -m 700 "$data_dir"
+
+# Establish recovery before rebuilding the application. If venv or pip fails,
+# the same guarded uninstaller can still remove the partial installation.
+install -m 644 "$source_dir/deploy/drivecheck.service" "$unit_path"
+install -m 755 "$source_dir/scripts/uninstall-linux.sh" "$uninstall_path"
+printf '%s\n' 'drivecheck-linux-install-v1' >"$marker"
+chmod 600 "$marker"
+systemctl daemon-reload
+
 find "$app_dir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 cp -R "$source_dir/drivecheck" "$app_dir/drivecheck"
 install -m 644 "$source_dir/pyproject.toml" "$source_dir/requirements.lock" \
@@ -154,20 +173,20 @@ python3 -m venv "$app_dir/.venv"
 if [[ ! -e "$config_dir/drivecheck.env" ]]; then
   install -m 600 "$source_dir/.env.example" "$config_dir/drivecheck.env"
 fi
-install -m 644 "$source_dir/deploy/drivecheck.service" "$unit_path"
-install -m 755 "$source_dir/scripts/uninstall-linux.sh" "$uninstall_path"
-printf '%s\n' 'drivecheck-linux-install-v1' >"$marker"
-chmod 600 "$marker"
+initially_missing=${missing[*]-}
+if [[ -f "$manifest" ]] && grep -q '^apt_packages_initially_missing=' "$manifest"; then
+  previous_missing=$(sed -n 's/^apt_packages_initially_missing=//p' "$manifest" | head -n 1)
+  initially_missing=$previous_missing
+fi
 {
   printf 'format=1\n'
   printf 'installed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf 'apt_packages_initially_missing=%s\n' "${missing[*]}"
+  printf 'apt_packages_initially_missing=%s\n' "$initially_missing"
   printf 'owned_paths=%s\n' '/opt/drivecheck /etc/systemd/system/drivecheck.service /usr/local/sbin/drivecheck-uninstall'
   printf 'preserved_paths=%s\n' '/etc/drivecheck /var/lib/drivecheck'
 } >"$manifest"
 chmod 600 "$manifest"
 
-systemctl daemon-reload
 systemctl enable drivecheck.service
 if [[ "$start_service" == true ]]; then
   systemctl start drivecheck.service

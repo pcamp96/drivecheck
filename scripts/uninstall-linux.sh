@@ -19,12 +19,16 @@ case "${1:-}" in
 esac
 
 install_root=${DRIVECHECK_TEST_ROOT:-}
+while [[ -n "$install_root" && "$install_root" != / && "$install_root" == */ ]]; do
+  install_root=${install_root%/}
+done
 if [[ -z "$install_root" ]]; then
   if [[ $(uname -s) != Linux || $EUID -ne 0 ]]; then
     echo "Run this uninstaller with sudo on Linux." >&2
     exit 1
   fi
-elif [[ ${DRIVECHECK_INSTALL_TESTING:-} != 1 || "$install_root" != /* ]]; then
+elif [[ ${DRIVECHECK_INSTALL_TESTING:-} != 1 || "$install_root" != /* || \
+        "$install_root" == / || -L "$install_root" ]]; then
   echo "DRIVECHECK_TEST_ROOT is reserved for isolated installer tests." >&2
   exit 1
 fi
@@ -54,7 +58,7 @@ guard_owned_path() {
 }
 
 guard_owned_path "$config_dir" directory
-if [[ ! -f "$marker" || $(cat -- "$marker") != drivecheck-linux-install-v1 ]]; then
+if [[ -L "$marker" || ! -f "$marker" || $(cat -- "$marker") != drivecheck-linux-install-v1 ]]; then
   echo "DriveCheck ownership marker is missing; refusing to remove fixed paths." >&2
   exit 1
 fi
@@ -63,8 +67,13 @@ guard_owned_path "$data_dir" directory
 guard_owned_path "$unit_path" file
 guard_owned_path "$uninstall_path" file
 
-systemctl stop drivecheck.service 2>/dev/null || true
-systemctl disable drivecheck.service 2>/dev/null || true
+if systemctl list-unit-files drivecheck.service --no-legend 2>/dev/null | grep -q '^drivecheck.service'; then
+  systemctl stop drivecheck.service
+  systemctl disable drivecheck.service
+elif [[ -e "$app_dir" || -e "$unit_path" ]]; then
+  echo "DriveCheck files remain but systemd cannot find its unit; refusing unsafe removal." >&2
+  exit 1
+fi
 rm -rf -- "$app_dir"
 rm -f -- "$unit_path"
 systemctl daemon-reload
