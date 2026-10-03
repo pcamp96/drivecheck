@@ -100,6 +100,7 @@ label { display: block; margin: 15px 0 6px; font-weight: 650; }
 .station-rail nav { display: grid; gap: 3px; }
 .station-rail nav a { padding: 8px 0; color: #b8c5d5; text-decoration: none; }
 .station-rail nav a:hover { color: white; }
+.station-rail nav a[aria-current="page"] { color: white; font-weight: 700; }
 .rail-actions { display: grid; gap: 12px; }
 .station-rail .quiet-button { color: white; border-color: #5a718c; }
 
@@ -189,9 +190,41 @@ main > section { max-width: 1350px; margin: 0 auto 58px; scroll-margin-top: 28px
 .result-body { padding: 0 13px 13px; color: var(--slate); }
 .result-body p { margin: 5px 0; }
 .result-body pre, .log-block { max-height: 270px; overflow: auto; margin: 10px 0 0; padding: 12px; color: #dce6f3; background: var(--ink); border-radius: 5px; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
+.diagnostic-summary { margin: 3px 0 14px; padding: 13px 14px; border-left: 4px solid var(--slate); border-radius: 4px; color: var(--ink); background: var(--chalk); }
+.diagnostic-summary.warning { border-left-color: var(--amber); background: var(--amber-soft); }
+.diagnostic-summary.failed { border-left-color: var(--red); background: var(--red-soft); }
+.diagnostic-summary.passed { border-left-color: var(--teal); background: var(--teal-soft); }
+.diagnostic-summary > strong { display: block; font-size: 15px; }
+.diagnostic-summary p { margin-top: 4px; }
+.result-body h5 { margin: 17px 0 7px; color: var(--ink); font-size: 13px; }
+.result-detail { color: var(--ink); font-weight: 650; }
+.evidence-warnings { margin: 5px 0 0; padding-left: 20px; }
+.evidence-warnings li + li { margin-top: 4px; }
+.evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.evidence-row { min-width: 0; padding: 10px 11px; border: 1px solid var(--line); border-radius: 5px; background: var(--chalk); }
+.evidence-row strong, .evidence-row span { display: block; }
+.evidence-row strong { color: var(--ink); font-size: 12px; }
+.evidence-row span { margin-top: 2px; color: var(--ink); font-size: 16px; font-weight: 750; overflow-wrap: anywhere; }
+.evidence-row p { margin-top: 4px; font-size: 12px; }
+.self-test-history { margin-top: 17px; }
+.history-note { margin-bottom: 8px !important; }
+.self-test-record { padding: 9px 0; border-top: 1px solid var(--line); }
+.self-test-record strong, .self-test-record span { display: block; }
+.self-test-record strong { color: var(--ink); }
+.self-test-record span { margin-top: 2px; font-size: 12px; }
+.self-test-record p { margin-top: 3px; }
+.technical-details { margin-top: 14px; border-top: 1px solid var(--line); }
+.result-row .technical-details > summary { display: list-item; padding: 10px 0 0; color: var(--slate); font-size: 12px; font-weight: 650; }
+.report-actions { margin: 18px 0; padding: 14px 15px; border: 1px solid var(--line); border-left: 4px solid var(--cobalt); border-radius: 6px; background: #f7f9fd; }
+.report .report-actions h4 { margin: 0 0 5px; }
+.report-actions p { margin: 4px 0; color: var(--slate); }
+.report-action-note { font-size: 12px; }
+.report-action-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.report-action-status { margin-top: 10px !important; color: var(--ink) !important; font-weight: 650; }
 .report h4 { margin: 23px 0 8px; }
 
-.settings-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+.settings-view { max-width: 880px; margin-left: 0; }
+.settings-grid { display: grid; grid-template-columns: minmax(0, 780px); gap: 18px; }
 .settings-grid fieldset { min-width: 0; margin: 0; padding: 20px; border: 1px solid var(--line); border-radius: 8px; background: white; }
 .settings-grid legend { padding: 0 7px; font-size: 17px; font-weight: 750; }
 .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 22px; margin: 0 0 20px; }
@@ -261,6 +294,7 @@ dialog code { padding: 2px 4px; color: #821d14; background: var(--red-soft); bor
   .drive-card { grid-template-columns: 1fr 1fr; }
   .drive-main, .drive-actions, .profile-help { grid-column: 1 / -1; }
   .report-summary { grid-template-columns: 1fr 1fr; }
+  .evidence-grid { grid-template-columns: 1fr; }
   .settings-grid, .run-list { grid-template-columns: 1fr; }
   .report-head { display: block; }
   .report-head button { margin-top: 13px; }

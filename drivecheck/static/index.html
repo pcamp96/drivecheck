@@ -44,7 +44,7 @@
   <div class="app-shell" id="app-view" hidden>
     <aside class="station-rail" aria-label="Station status">
       <div>
-        <a class="brand" href="#main" aria-label="DriveCheck dashboard">
+        <a class="brand" href="#dashboard" aria-label="DriveCheck dashboard">
           <span class="brand-symbol" aria-hidden="true"><i></i><i></i><i></i></span>
           <span>DriveCheck</span>
         </a>
@@ -56,11 +56,11 @@
           <div><dt>Version</dt><dd id="version">—</dd></div>
         </dl>
       </div>
-      <nav aria-label="Dashboard sections">
-        <a href="#active">Active test</a>
-        <a href="#drives">Drive inventory</a>
-        <a href="#history">History</a>
-        <a href="#settings">Settings</a>
+      <nav aria-label="Dashboard views">
+        <a href="#dashboard" data-view="dashboard">Workbench</a>
+        <a href="#drives" data-view="dashboard">Drive inventory</a>
+        <a href="#history" data-view="dashboard">History</a>
+        <a href="#settings" data-view="settings">Settings</a>
       </nav>
       <div class="rail-actions">
         <button class="quiet-button" id="scan-button" type="button">Scan for drives</button>
@@ -72,13 +72,14 @@
       <header class="page-header">
         <div>
           <p class="date-line" id="date-line"></p>
-          <h1>Drive intake workbench</h1>
+          <h1 id="page-title">Drive intake workbench</h1>
         </div>
         <div class="stream-state" id="stream-state" role="status"><span></span>Connecting to live updates</div>
       </header>
 
       <div class="global-error" id="global-error" role="alert" hidden></div>
 
+      <div class="dashboard-view" id="dashboard-view">
       <section class="active-panel" id="active" aria-labelledby="active-title">
         <div class="section-heading">
           <div><h2 id="active-title" tabindex="-1">Active test</h2><p id="active-subtitle">The station is ready for a drive.</p></div>
@@ -128,10 +129,11 @@
           </article>
         </div>
       </section>
+      </div>
 
-      <section id="settings" aria-labelledby="settings-title">
+      <section class="settings-view" id="settings" aria-labelledby="page-title" hidden>
         <div class="section-heading">
-          <div><h2 id="settings-title">Station settings</h2><p>Notification credentials remain stored on the station and are never returned here.</p></div>
+          <div><p>Notification credentials remain stored on the station and are never returned here.</p></div>
         </div>
         <form class="settings-grid" id="settings-form">
           <fieldset>
@@ -168,7 +170,7 @@
             <label class="check-row" for="notify-ready"><input type="checkbox" id="notify-ready"> Notify when the station is ready after startup</label>
             <label class="check-row" for="notify-started"><input type="checkbox" id="notify-started"> Notify when a test starts</label>
             <div class="form-actions">
-              <button type="submit">Save settings</button>
+              <button type="submit">Save notification settings</button>
               <button type="button" class="quiet-button" id="test-notification">Send test message</button>
             </div>
             <p class="form-status" id="settings-status" role="status"></p>

@@ -17,9 +17,82 @@ from pathlib import Path
 import httpx
 from playwright.sync_api import expect, sync_playwright
 
+from drivecheck.storage import Store
+
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ROOT / "artifacts"
 TOKEN = "browser-test-token-not-a-real-station-secret"
+
+
+def failed_report_fixture(drive: dict) -> dict:
+    """Representative ATA failure based on a real report, with synthetic identity."""
+    historical = {
+        "status": {"string": "Completed: read failure"},
+        "type": {"string": "Short offline"},
+        "lifetime_hours": 4182,
+        "lba_of_first_error": 604616,
+    }
+    current = {
+        "status": {"string": "Completed: read failure"},
+        "type": {"string": "Extended offline"},
+        "lifetime_hours": 4190,
+        "lba_of_first_error": 622728,
+    }
+    fixture_drive = {
+        **drive,
+        "id": "fixture-absent-drive",
+        "path": "/dev/fixture-absent",
+        "serial": "FIXTURE-FAILED-DRIVE",
+        "identity": "fixture-absent-identity",
+    }
+    return {
+        "id": "browser-failed-report",
+        "drive_id": fixture_drive["id"],
+        "drive": fixture_drive,
+        "profile": "extended",
+        "status": "failed",
+        "workflow_status": "finished",
+        "phase": "self_test",
+        "progress": 36,
+        "detail": "A drive self-test found a read failure.",
+        "created_at": "2099-01-01T00:00:00+00:00",
+        "started_at": "2099-01-01T00:00:01+00:00",
+        "finished_at": "2099-01-01T00:06:00+00:00",
+        "results": {
+            "smart_before": {
+                "health": "warning",
+                "warnings": ["the self-test log contains errors"],
+                "raw": {
+                    "smart_status": {"passed": True},
+                    "ata_smart_attributes": {
+                        "table": [
+                            {"id": 5, "name": "Reallocated_Sector_Ct", "raw": {"value": 2}},
+                            {"id": 197, "name": "Current_Pending_Sector", "raw": {"value": 1}},
+                            {"id": 198, "name": "Offline_Uncorrectable", "raw": {"value": 3}},
+                        ]
+                    },
+                    "ata_smart_self_test_log": {"standard": {"table": [historical]}},
+                },
+            },
+            "self_test": {
+                "status": "failed",
+                "detail": "Completed: read failure",
+                "raw": {
+                    "smart_status": {"passed": True},
+                    "ata_smart_self_test_log": {
+                        "standard": {"table": [current, historical]}
+                    },
+                },
+            },
+        },
+        "logs": [{"time": "2099-01-01T00:06:00+00:00", "message": "Self test: failed"}],
+        "lifecycle": {
+            "notification_status": "disabled",
+            "eject_status": "ejected",
+            "eject_detail": "Drive safely ejected after the failed test.",
+        },
+        "simulated": True,
+    }
 
 
 def main():
@@ -55,6 +128,12 @@ def main():
                 time.sleep(0.05)
             else:
                 raise RuntimeError("Preview startup timed out")
+            state = httpx.get(
+                base + "/api/state", headers={"Authorization": f"Bearer {TOKEN}"}
+            ).json()
+            store = Store(Path(temp) / "drivecheck.sqlite3")
+            store.save(failed_report_fixture(state["drives"][0]))
+            store.close()
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch()
                 context = browser.new_context(viewport={"width": 1440, "height": 1100})
@@ -69,6 +148,39 @@ def main():
                 expect(page.locator("#drive-count")).to_have_text("1")
                 expect(page.locator("#mode-flag")).to_contain_text("Simulated")
 
+                # A failed report explains current state, historical evidence, and this run
+                # without requiring the operator to read the underlying smartctl JSON.
+                page.locator('.run-item[data-run-id="browser-failed-report"]').click()
+                expect(page.locator("#report")).to_contain_text(
+                    "SMART’s overall check passes now, but recorded errors need attention"
+                )
+                expect(page.locator("#report")).to_contain_text("Recorded self-test history")
+                expect(page.locator("#report")).to_contain_text("Short offline — Completed: read failure")
+                expect(page.locator("#report")).to_contain_text("Failure location: LBA 604,616")
+                expect(page.locator("#report")).to_contain_text("This self-test found a drive error")
+                expect(page.locator("#report")).to_contain_text(
+                    "The drive could not read part of its surface"
+                )
+                expect(page.locator("#report")).to_contain_text(
+                    "Extended offline — Completed: read failure"
+                )
+                expect(page.locator("#report")).to_contain_text("Failure location: LBA 622,728")
+                expect(page.locator("#report")).to_contain_text(
+                    "A passing SMART overall check is only one signal"
+                )
+                expect(page.locator(".technical-details").first).not_to_have_attribute("open", "")
+                expect(
+                    page.get_by_role("button", name="Reconnect / test again", exact=True)
+                ).to_be_visible()
+                page.screenshot(path=str(ARTIFACTS / "failed-report-desktop.png"), full_page=True)
+                page.get_by_role("button", name="Reconnect / test again", exact=True).click()
+                expect(page.locator(".report-action-status")).to_contain_text(
+                    "Reconnect the drive or power-cycle its USB dock"
+                )
+                expect(
+                    page.get_by_role("button", name="Reconnect / test again", exact=True)
+                ).to_be_focused()
+
                 # Confirm a second browser sees the same live test without refreshing.
                 second = context.new_page()
                 second.goto(base)
@@ -77,6 +189,9 @@ def main():
                 expect(second.locator("#active-content")).to_be_visible()
                 expect(page.locator("#run-list")).to_contain_text("Passed", timeout=15000)
                 expect(second.locator("#run-list")).to_contain_text("Passed", timeout=15000)
+                expect(
+                    page.get_by_role("button", name="Test again (read-only)", exact=True)
+                ).to_be_visible()
                 page.screenshot(path=str(ARTIFACTS / "dashboard-desktop.png"), full_page=True)
                 with page.expect_download() as download_info:
                     page.get_by_role("link", name="Export JSON").click()
@@ -99,11 +214,17 @@ def main():
                 page.locator("#verify-cancel").click()
 
                 # Save both provider configurations disabled; no messages are sent.
+                page.get_by_role("link", name="Settings", exact=True).click()
+                expect(page.locator("#settings")).to_be_visible()
+                expect(page.locator("#dashboard-view")).to_be_hidden()
+                setting_cards = page.locator("#settings-form fieldset")
+                assert setting_cards.nth(1).bounding_box()["y"] > setting_cards.nth(0).bounding_box()["y"]
+                page.screenshot(path=str(ARTIFACTS / "settings-desktop.png"), full_page=True)
                 page.locator("#notification-provider").select_option("discord")
                 page.locator("#discord-webhook").fill(
                     "https://discord.com/api/webhooks/123/synthetic_secret"
                 )
-                page.get_by_role("button", name="Save settings", exact=True).click()
+                page.get_by_role("button", name="Save notification settings", exact=True).click()
                 expect(page.locator("#discord-configured")).to_have_text("A webhook is saved.")
                 expect(page.locator("#discord-webhook")).to_have_value("")
                 page.locator("#forget-discord").click()
@@ -111,7 +232,7 @@ def main():
                 page.locator("#notification-provider").select_option("telegram")
                 page.locator("#telegram-token").fill("123:synthetic_secret")
                 page.locator("#telegram-chat").fill("-987")
-                page.get_by_role("button", name="Save settings", exact=True).click()
+                page.get_by_role("button", name="Save notification settings", exact=True).click()
                 expect(page.locator("#telegram-configured")).to_have_text(
                     "Telegram credentials saved"
                 )
@@ -190,7 +311,7 @@ def main():
                 assert not errors, errors
                 browser.close()
             print(
-                "Browser verification passed: login, SSE in two tabs, completed report/export, cancellation, erase confirmation, settings/secret clearing, reconnect, mobile, logout."
+                "Browser verification passed: login, SSE, readable failed SMART/self-test evidence, reconnect/retest actions, report export, cancellation, erase confirmation, dedicated settings, secret clearing, mobile, logout."
             )
         finally:
             process.terminate()
