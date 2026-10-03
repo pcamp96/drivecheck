@@ -25,6 +25,10 @@ transport, eligible, reasons (list[str]), identity (str), mounted (bool).
   on whole drive only after manual arming and serial confirmation.
 - async `cancel()` terminates active child process group / drive self-test.
 All methods fail closed when disks disconnect, mounts appear, or identity changes.
+Discovery polls in an independent runner; fio holds an exclusive Linux block
+claim, continuously revalidates identity/path/rdev, streams cumulative JSON status,
+and requires exact expected byte coverage. A logical-sector-aligned block size
+covers disks whose capacity is not a multiple of 1 MiB.
 
 ## Backend/dashboard API
 All `/api` routes except `/api/login` and `/api/health` require cookie session or

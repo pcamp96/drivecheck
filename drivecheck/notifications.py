@@ -62,9 +62,7 @@ async def send(settings: dict, message: str, transport=None) -> None:
                     json={"chat_id": settings["telegram_chat_id"], "text": message[:4000]},
                 )
             if response.status_code == 429:
-                raise NotificationError(
-                    f"{provider.title()} rate limit reached; delivery will retry"
-                )
+                raise NotificationError(f"{provider.title()} rate limit reached. Try again later")
             if not 200 <= response.status_code < 300:
                 raise NotificationError(
                     f"{provider.title()} rejected delivery (HTTP {response.status_code}). Check provider credentials and permissions."

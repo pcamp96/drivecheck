@@ -163,7 +163,7 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
         attempts[address] = failures
         if len(failures) >= 5:
             raise HTTPException(429, "Too many attempts. Wait one minute and try again.")
-        if not secrets.compare_digest(body.token, config.api_key):
+        if not secrets.compare_digest(body.token.encode(), config.api_key.encode()):
             failures.append(timestamp)
             raise HTTPException(401, "Incorrect station access token")
         attempts.pop(address, None)

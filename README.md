@@ -79,7 +79,8 @@ valid capacity are accepted. System storage, mounted partitions, active swap,
 internal disks, missing serials and duplicate bridge identities are blocked.
 Disable desktop automount on the Pi; run the service on a dedicated station.
 Review the identity and capacity before starting a test. All phases recheck
-identity; a disconnect, mount or changed identity stops the test as incomplete.
+identity; an exclusive block-device claim prevents a new mount during raw I/O.
+A disconnect or changed identity stops the test as incomplete.
 A raw full-drive write destroys partitions and files. It is never auto-triggered.
 
 To deliberately enable full-drive write verification, change
@@ -128,8 +129,7 @@ Select a test in History to inspect every result and its log. Download the JSON
 report for article evidence or archiving. Reports include raw SMART/fio data,
 selected profile, coverage, identity, timestamps, and a simulation flag.
 The dashboard displays the newest 200 runs; older reports remain in SQLite and
-are available by their run ID. Hardware mode does not convert JSON reports to
-human benchmark graphs; the result view exposes raw detail alongside key speed.
+are available by their run ID. The result view exposes raw detail alongside key speed.
 
 ```sh
 sudo journalctl -u drivecheck -f
@@ -150,6 +150,8 @@ uv run --extra dev pytest
 uv run --extra dev ruff check .
 uv run --extra dev ruff format --check .
 node --check drivecheck/static/app.js
+uv run --extra dev playwright install chromium
+uv run --extra dev python scripts/verify-browser.py
 ```
 
 See [Monday's test plan](docs/MONDAY-TEST-PLAN.md),

@@ -180,3 +180,8 @@ def test_invalid_authorization_never_falls_back_to_cookie_and_clear_secrets(tmp_
         assert response.status_code == 200
         assert response.json()["notifications"]["discord_configured"] is False
         assert "secret" not in (tmp_path / "settings.json").read_text()
+
+
+def test_non_ascii_login_is_rejected_cleanly(tmp_path):
+    with TestClient(app(tmp_path)) as client:
+        assert client.post("/api/login", json={"token": "incorrect-é"}).status_code == 401

@@ -10,7 +10,10 @@ performance claims.
 2. With a partition mounted on the USB drive, check that testing is blocked.
    Unmount it and rescan. Ensure desktop automount is disabled before real I/O.
 3. Run **Quick**. Confirm SMART data is from the target drive and fio measures
-   reads; download the report. Validate file/partition contents remain intact.
+   reads; download the report. Confirm fio can open the device while DriveCheck
+   holds its exclusive block-device claim, and confirm the full scan reports
+   coverage equal to the disk capacity including its final sectors. Validate
+   file/partition contents remain intact.
 4. Run **Extended**. Confirm the new extended self-test reaches completion and
    full read scan covers the drive. Capture elapsed time and dashboard updates
    from a second browser. Refresh/reconnect during the job; it should continue.
