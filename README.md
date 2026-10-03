@@ -151,9 +151,13 @@ tests. In groups, configure **Authorized Telegram user ID** (or
 `DRIVECHECK_TELEGRAM_USER_ID`) in addition to the chat ID. Both chat and sender must
 match. Channel usernames can receive notices but cannot authorize test controls.
 Buttons only apply to the current connected drive during its action window; expired,
-replayed, missing, mounted, or replaced drive actions are rejected. Writes cannot
-be started from Telegram buttons. Use the dashboard's separately enabled and
-serial-confirmed write verification flow when deliberately erasing a drive.
+replayed, missing, mounted, or replaced drive actions are rejected. When manual
+erase is enabled, **Quick erase** and **Full erase** buttons open a confirmation
+prompt; pressing the button does not write to the drive. Reply to that exact
+prompt with `QUICK ERASE <exact serial>` or `FULL ERASE <exact serial>` within
+120 seconds (or the remaining eject window, whichever is shorter). Only the
+configured chat and authorized sender can confirm. The original eject countdown
+continues while the prompt is open. Discord only sends notifications.
 
 In groups/channels, the dashboard link requires the normal station login; sign-in
 grants are sent only to the authorized private numeric chat.
@@ -177,6 +181,8 @@ a brief health screen and read sample; it does not establish full-surface health
 | Quick | SMART before/after and a 30-second sequential read sample | None |
 | Extended | SMART, extended drive self-test, read benchmark, full read scan, final SMART | None |
 | Write verification | Extended self-test, read benchmark, full-drive write and checksum readback, SMART before/after | **Entire selected drive overwritten** |
+| Quick erase (manual) | Supported ATA firmware secure erase; otherwise clearly identified quick-format fallback | **Existing data lost** |
+| Full erase (manual) | Full accessible drive overwrite and SHA-256 checksum readback | **Entire selected drive overwritten** |
 
 Choose a drive on the dashboard and start Quick or Extended. Enable automatic
 intake in Settings to queue **Quick, read-only** checks on eligible drives.
@@ -218,9 +224,40 @@ identity; on Linux an exclusive block-device claim prevents a new mount during r
 A disconnect or changed identity stops the test as incomplete.
 A raw full-drive write destroys partitions and files. It is never auto-triggered.
 
-To deliberately enable full-drive write verification, change
+An old Linux RAID member can remain claimed by an inactive MD array. **Take
+control + Quick** is available only when the array is inactive, all its members
+belong to this selected drive, and there are no mounts, swap, or upper device
+holders. Type `TAKE CONTROL <exact serial>` to stop that specific inactive array
+and queue read-only Quick intake. It preserves RAID metadata and existing file
+contents. Active/shared arrays and other holders remain blocked; DriveCheck
+never automatically takes control or removes RAID metadata.
+
+Quick erase detects ATA security support through the Linux drive/USB bridge.
+Firmware erase can still take hours despite the profile name. Frozen, locked,
+already security-enabled drives, ambiguous probe results, and failed firmware
+commands are blocked rather than silently formatted. If ATA security is explicitly
+unsupported (or `hdparm` is unavailable), the confirmation offers a GPT disk with
+one exFAT partition. This fallback is **not secure erasure**: old file contents can
+remain recoverable. The installer includes `hdparm`, `gdisk`, `exfatprogs`, `parted`,
+and `mdadm` along with the testing tools. macOS remains read-only; erase and RAID
+takeover are currently Linux-only.
+
+Firmware erase uses a temporary password with a protected recovery record under
+`<data directory>/erase-recovery/<drive identity>.json` (directory 0700, file 0600).
+The password never goes into reports or messages. Once firmware erase is armed,
+normal cancellation is unavailable. A failure, timeout, disconnect, or interrupted
+service leaves the record intact, marks the job incomplete, and blocks testing,
+erasing, and ejection of that drive, including after restart. Do not power off;
+inspect the recovery record and drive security state before deliberate recovery.
+DriveCheck does not automatically unlock, retry, or downgrade an uncertain erase.
+Do not delete that record merely to bypass the guard.
+
+To deliberately enable manual erase and full-drive write verification, change
 `DRIVECHECK_ALLOW_DESTRUCTIVE=true` in the station environment and restart the
-service. The dashboard then requires typing `ERASE <exact serial>` for each job.
+service. The dashboard shows the detected erase method before requiring
+`QUICK ERASE <exact serial>` or `FULL ERASE <exact serial>`; legacy write verification
+still uses `ERASE <exact serial>`. A changed method requires a fresh confirmation.
+Automatic intake always remains Quick and read-only, even with manual erase enabled.
 Queued/running jobs are recorded as incomplete on restart, and erase jobs never
 resume automatically. Cancellation is best effort for the drive's internal
 self-test; review its status before disconnecting.

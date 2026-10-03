@@ -103,7 +103,7 @@ fi
 
 python3 -c 'import sys; assert sys.version_info >= (3, 11), "Python 3.11 or newer is required"'
 
-packages=(python3-venv python3-pip smartmontools fio util-linux udisks2)
+packages=(python3-venv python3-pip smartmontools fio util-linux udisks2 mdadm hdparm gdisk exfatprogs parted)
 missing=()
 for package in "${packages[@]}"; do
   if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q '^install ok installed$'; then
