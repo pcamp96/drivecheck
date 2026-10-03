@@ -42,12 +42,20 @@ def main():
     from drivecheck.app import create_app
 
     app = create_app(config)
+    server_config = uvicorn.Config(
+        app, host=args.host, port=args.port, workers=1, proxy_headers=False
+    )
+    # Reserve the endpoint before lifespan can announce readiness or queue work.
+    listener = server_config.bind_socket()
     print(f"DriveCheck {'simulation' if config.demo else 'hardware'} station")
-    print(f"Dashboard: http://{args.host}:{args.port}")
+    print(f"Dashboard: http://{args.host}:{listener.getsockname()[1]}")
     print(
         f"Read your sign-in token from {config.data_dir / 'access-token'} (or use DRIVECHECK_API_KEY)"
     )
-    uvicorn.run(app, host=args.host, port=args.port, workers=1, proxy_headers=False)
+    try:
+        uvicorn.Server(server_config).run(sockets=[listener])
+    finally:
+        listener.close()
 
 
 if __name__ == "__main__":

@@ -45,7 +45,7 @@ return the same full snapshot:
  runs: [run newest first, including active/queued],
  settings: {auto_test, auto_eject, headless, notifications_from_env, notifications: {provider: "none"|"discord"|"telegram",
  enabled, discord_configured, telegram_configured, discord_webhook: "",
- telegram_token: "", telegram_chat_id, notify_started}},
+ telegram_token: "", telegram_chat_id, notify_started, notify_ready}},
  system: {active_run_id, platform, capabilities: {}, release_in_progress, discovery_error, tools: {}, notification_error}
 }
 ```
@@ -89,3 +89,11 @@ raw character device and a portable fio engine. It continuously checks identity
 and mount state, without Linux's O_EXCL mount exclusion; destructive verification
 is disabled. Normal diskutil unmount/eject is allowed only on fresh matching
 external devices. Linux release refuses a shared/unknown USB power-off scope.
+
+## Station readiness notices
+The CLI binds its HTTP socket before app startup. After successful discovery and
+worker initialization, the engine persists one `startup:ready:<boot-id>` notice
+when the configured provider is enabled and `notify_ready` is true. It uses the
+normal outbox retry behavior. Undelivered startup notices from prior processes
+are discarded on restart so an old process cannot announce readiness. Messages
+report the boot timestamp and distinguish read testing from inventory/simulation.

@@ -18,7 +18,7 @@ const elements = {
   telegramFields: $("#telegram-fields"),
   telegramToken: $("#telegram-token"), telegramChat: $("#telegram-chat"),
   telegramConfigured: $("#telegram-configured"), forgetTelegram: $("#forget-telegram"),
-  notifyStarted: $("#notify-started"),
+  notifyStarted: $("#notify-started"), notifyReady: $("#notify-ready"),
   destructiveSetting: $("#destructive-setting"), hardwareSetting: $("#hardware-setting"),
   settingsStatus: $("#settings-status"), verifyDialog: $("#verify-dialog"),
   verifyForm: $("#verify-form"), verifyDriveName: $("#verify-drive-name"),
@@ -435,11 +435,12 @@ function renderSettings(force = false) {
   elements.autoEject.disabled = Boolean(settings.headless);
   elements.automationNote.textContent = settings.headless ? "Headless mode: dock → read-only extended test → message → safe eject." : "Automatic intake only starts for unmounted external drives with a unique identity.";
   const managed = Boolean(settings.notifications_from_env);
-  [elements.notificationsEnabled, elements.provider, elements.discordWebhook, elements.telegramToken, elements.telegramChat, elements.notifyStarted, elements.forgetDiscord, elements.forgetTelegram].forEach((field) => { field.disabled = managed; });
+  [elements.notificationsEnabled, elements.provider, elements.discordWebhook, elements.telegramToken, elements.telegramChat, elements.notifyStarted, elements.notifyReady, elements.forgetDiscord, elements.forgetTelegram].forEach((field) => { field.disabled = managed; });
   if (managed) elements.automationNote.textContent += " Notifications are managed by the station environment.";
   elements.notificationsEnabled.checked = Boolean(notifications.enabled);
   elements.provider.value = notifications.provider || "none";
   elements.notifyStarted.checked = Boolean(notifications.notify_started);
+  elements.notifyReady.checked = notifications.notify_ready !== false;
   elements.telegramChat.value = notifications.telegram_chat_id || "";
   elements.discordWebhook.value = "";
   elements.telegramToken.value = "";
@@ -546,7 +547,8 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     discord_webhook: elements.discordWebhook.value,
     telegram_token: elements.telegramToken.value,
     telegram_chat_id: elements.telegramChat.value,
-    notify_started: elements.notifyStarted.checked
+    notify_started: elements.notifyStarted.checked,
+    notify_ready: elements.notifyReady.checked
   };
   try {
     await api("/api/settings", { method: "PUT", body: { auto_test: elements.autoTest.checked, auto_eject: elements.autoEject.checked, ...(snapshot.settings?.notifications_from_env ? {} : { notifications: notificationSettings }) } });

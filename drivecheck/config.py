@@ -48,6 +48,7 @@ class Config:
                 "telegram_token": os.getenv("DRIVECHECK_TELEGRAM_TOKEN", ""),
                 "telegram_chat_id": os.getenv("DRIVECHECK_TELEGRAM_CHAT_ID", ""),
                 "notify_started": boolean(os.getenv("DRIVECHECK_NOTIFY_STARTED")),
+                "notify_ready": boolean(os.getenv("DRIVECHECK_NOTIFY_READY"), True),
             }
         return cls(
             data_dir=Path(os.getenv("DRIVECHECK_DATA_DIR", "data")).expanduser().resolve(),
@@ -91,6 +92,7 @@ DEFAULT_SETTINGS = {
         "telegram_token": "",
         "telegram_chat_id": "",
         "notify_started": False,
+        "notify_ready": True,
     },
 }
 

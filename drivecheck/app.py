@@ -45,6 +45,7 @@ class NotificationInput(Input):
     telegram_token: str | None = Field(default=None, max_length=256)
     telegram_chat_id: str | None = Field(default=None, max_length=100)
     notify_started: bool | None = None
+    notify_ready: bool | None = None
     clear_discord: bool | None = None
     clear_telegram: bool | None = None
 

@@ -57,23 +57,23 @@ bridge/driver; unsupported health/self-test checks produce incomplete reports.
 Eject uses `diskutil eject`. Internal, system-backed, virtual, ambiguous, or
 unidentified disks are blocked. Windows currently supports simulation only.
 
-## Install on the Pi
+## Install on Linux (Raspberry Pi or Ubuntu)
 
 Use Raspberry Pi OS Bookworm or newer, **64-bit**, Python 3.11+, a Pi 4/5 and a
-powered USB-to-SATA dock with working SMART passthrough. Boot the Pi from separate
-storage. Copy this folder to the Pi using your preferred transfer method (a Git
+powered USB-to-SATA dock with working SMART passthrough. Ubuntu hosts with Python
+3.11+ are also supported. Boot from separate storage. Copy this folder to the Pi using your preferred transfer method (a Git
 remote is not required), then run:
 
 ```sh
 cd drivecheck
-sudo bash scripts/install-pi.sh
+sudo bash scripts/install-linux.sh
 sudo systemctl status drivecheck
 sudo cat /var/lib/drivecheck/access-token
 ```
 
 The installer installs Debian's `fio` (Flexible I/O Tester), `smartmontools`, and
 `util-linux` and `udisks2`, installs the locked Python dependencies, and creates a systemd
-service. It preserves existing station settings when rerun. Stop the service
+service. `install-pi.sh` remains an alias. It preserves existing station settings when rerun. Stop the service
 before updating the installed application. It runs as root because raw block
 I/O and SMART ioctls need device permissions. Its web listener defaults to
 loopback; use an SSH tunnel from your computer:
@@ -178,7 +178,12 @@ Blank secret inputs preserve existing credentials. Stored secrets have mode
 0600 and never appear in API snapshots or downloaded reports. Disable delivery
 before forgetting saved credentials. Optional start notices are off by default;
 completion, failure, cancellation, and incomplete results are delivered when
-notifications are enabled.
+notifications are enabled. **Notify when the station is ready after startup** is
+on by default: once startup/discovery succeeds, the station sends its boot time
+and readiness status through the same provider. A network outage queues that
+notice for retry; a restart replaces any undelivered notice from the previous
+boot. Startup failures never announce readiness. For environment-managed
+notifications, set `DRIVECHECK_NOTIFY_READY=false` to turn this off.
 
 - **Discord:** Create an incoming webhook for a standard text channel in channel
   settings, then paste its HTTPS URL. DriveCheck uses `wait=true` to confirm
@@ -216,6 +221,30 @@ SQLite, and the access token. Keep that directory private. To rotate the generat
 access token, stop the service, remove only `access-token`, and restart. Sessions
 expire after 12 hours or a service restart. There must be one process/one worker
 per data directory; a filesystem lock enforces this.
+
+## Uninstall or reinstall
+
+The Linux installer adds a removal command:
+
+```sh
+sudo drivecheck-uninstall
+```
+
+It stops/disables the service and removes the application, its private Python
+environment, service unit, and uninstall command. It preserves
+`/etc/drivecheck` and `/var/lib/drivecheck`, including settings, reports and the
+sign-in token, so reinstalling can restore the station. To also permanently
+remove those DriveCheck settings and reports, explicitly run:
+
+```sh
+sudo drivecheck-uninstall --purge-data
+```
+
+Shared APT dependencies, system journal entries, and your source checkout remain
+installed. The installation manifest records packages that DriveCheck added.
+The uninstaller refuses unmanaged or symbolic-link installation paths. If the
+command has already been removed, run `sudo bash scripts/uninstall-linux.sh`
+from the source checkout. Stop active tests before uninstalling.
 
 ## Development verification
 
