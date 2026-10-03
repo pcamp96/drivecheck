@@ -86,6 +86,7 @@ def disk(
         "model": "Test Disk",
         "serial": serial,
         "tran": tran,
+        "log-sec": 512,
         "mountpoints": mounts or [None],
         "children": children or [],
     }
@@ -95,6 +96,11 @@ def discovery(hardware: Hardware, *payloads: dict[str, object]) -> FakeRunner:
     runner = FakeRunner([result(("lsblk",), payload) for payload in payloads])
     hardware._discovery_runner = runner
     return runner
+
+
+@pytest.fixture(autouse=True)
+def fake_block_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Hardware, "_pin_device", staticmethod(lambda _: 2049))
 
 
 @pytest.mark.asyncio
@@ -409,8 +415,33 @@ async def test_destructive_surface_uses_checksum_and_read_write(monkeypatch: pyt
     fio_call = next(call for call in hardware._runner.calls if call[0] == "fio")
     assert "--verify=sha256" in fio_call
     assert "--do_verify=1" in fio_call
-    assert "--readonly=0" in fio_call
+    assert "--readonly" not in fio_call
+    assert "--allow_file_create=0" in fio_call
     assert "--verify_backlog=1024" in fio_call
+
+
+@pytest.mark.asyncio
+async def test_full_surface_selects_aligned_block_size_for_non_mib_drive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = Hardware(demo=False)
+    odd_size = 4_000_787_030_016
+    odd = disk()
+    odd["size"] = odd_size
+    raw = {"jobs": [{"error": 0, "read": {"io_bytes": odd_size}}]}
+    discovery(hardware, *(lsblk(odd) for _ in range(4)))
+    hardware._runner = FakeRunner([result(("fio",), raw)])
+    monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
+    drive = (await hardware.discover())[0]
+
+    async def progress(_: int, __: str) -> None:
+        pass
+
+    report = await hardware.surface(drive, progress)
+    assert report["status"] == "passed"
+    fio_call = next(call for call in hardware._runner.calls if call[0] == "fio")
+    assert "--bs=8192" in fio_call
+    assert f"--size={odd_size}" in fio_call
 
 
 @pytest.mark.asyncio

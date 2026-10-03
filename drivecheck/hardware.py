@@ -14,6 +14,7 @@ import json
 import os
 import re
 import signal
+import stat
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
@@ -212,6 +213,7 @@ class Hardware:
         self.self_test_timeout_seconds = 48 * 60 * 60.0
         self.io_safety_poll_seconds = 3.0
         self.demo_step_seconds = 0.0
+        self._logical_sector_bytes: dict[str, int] = {}
 
     async def discover(self) -> list[Drive]:
         if self.demo:
@@ -221,7 +223,7 @@ class Hardware:
             "--json",
             "--bytes",
             "--output",
-            "NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,MOUNTPOINTS,PKNAME,RM,HOTPLUG",
+            "NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,MOUNTPOINTS,PKNAME,RM,HOTPLUG,LOG-SEC",
             timeout=15,
         )
         if result.returncode:
@@ -236,6 +238,7 @@ class Hardware:
 
         swaps = await self._swap_paths()
         records: list[tuple[dict[str, Any], Drive]] = []
+        logical_sectors: dict[str, int] = {}
         for node in nodes:
             if _text(node.get("type")) != "disk":
                 continue
@@ -264,7 +267,15 @@ class Hardware:
                 reasons.append("missing_serial")
             if size <= 0:
                 reasons.append("invalid_size")
+            try:
+                logical_sector = int(node.get("log-sec") or 0)
+            except (TypeError, ValueError):
+                logical_sector = 0
+            if logical_sector <= 0 or size % logical_sector:
+                reasons.append("invalid_logical_sector")
             ident = _identity(model, serial, size)
+            if logical_sector > 0:
+                logical_sectors[ident] = logical_sector
             records.append(
                 (
                     node,
@@ -296,6 +307,7 @@ class Hardware:
                 drive.reasons.append("duplicate_identity")
                 drive.eligible = False
             drives.append(drive)
+        self._logical_sector_bytes = logical_sectors
         return drives
 
     async def _swap_paths(self) -> set[str]:
@@ -620,6 +632,9 @@ class Hardware:
         expected_bytes: int,
     ) -> dict[str, Any]:
         current = await self.validate(drive, destructive=destructive)
+        device_number = self._pin_device(current.path)
+        logical_sector = self._logical_sector_bytes.get(current.identity, 0)
+        block_size = self._fio_block_size(expected_bytes, logical_sector)
         self._cancel_requested = False
 
         json_buffer = ""
@@ -651,19 +666,21 @@ class Hardware:
                 await progress(min(99, percent), detail)
 
         await progress(0, detail)
-        command = (
+        command_parts = [
             "fio",
             "--name=drivecheck",
             f"--filename={current.path}",
-            "--readonly=0" if destructive else "--readonly=1",
+            "--allow_file_create=0",
             "--direct=1",
             "--ioengine=libaio",
             "--iodepth=16",
-            "--bs=1M",
+            f"--bs={block_size}",
             "--output-format=json",
             "--status-interval=2",
-            *args,
-        )
+        ]
+        if not destructive:
+            command_parts.append("--readonly")
+        command = (*command_parts, *args)
         io_task = asyncio.create_task(
             self._runner.run(*command, timeout=timeout, stdout_chunk=parse_status)
         )
@@ -674,6 +691,8 @@ class Hardware:
                 break
             try:
                 await self.validate(current, destructive=destructive)
+                if self._pin_device(current.path) != device_number:
+                    raise SafetyError("block device number changed")
             except (SafetyError, CommandError) as exc:
                 safety_error = exc
                 await self._runner.cancel()
@@ -690,6 +709,8 @@ class Hardware:
         # Revalidation after I/O catches disconnect/replacement and new mounts.
         try:
             await self.validate(current, destructive=destructive)
+            if self._pin_device(current.path) != device_number:
+                raise SafetyError("block device number changed")
         except SafetyError as exc:
             return {"status": "incomplete", "detail": str(exc), "raw": raw}
         jobs = raw.get("jobs") or []
@@ -728,6 +749,29 @@ class Hardware:
             else:
                 response["read_mbps"] = round(float(bw) / 1_000_000, 1)
         return response
+
+    @staticmethod
+    def _pin_device(path: str) -> int:
+        try:
+            device_stat = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            raise SafetyError("drive path cannot be opened as a block device") from exc
+        if not stat.S_ISBLK(device_stat.st_mode):
+            raise SafetyError("drive path is not a block device")
+        return device_stat.st_rdev
+
+    @staticmethod
+    def _fio_block_size(size_bytes: int, logical_sector: int) -> int:
+        if logical_sector <= 0 or size_bytes <= 0 or size_bytes % logical_sector:
+            raise SafetyError("drive size is not aligned to its logical sector size")
+        block_size = 1024 * 1024
+        while block_size > logical_sector and size_bytes % block_size:
+            block_size //= 2
+        if block_size < logical_sector or block_size % logical_sector:
+            block_size = logical_sector
+        if size_bytes % block_size:
+            raise SafetyError("no safe fio block size covers the entire requested region")
+        return block_size
 
     @staticmethod
     def _json_documents(output: str) -> list[dict[str, Any]]:

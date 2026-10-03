@@ -19,7 +19,7 @@
     <div class="login-panel">
       <p class="product-name">DriveCheck</p>
       <h1 id="login-title">Open the workbench</h1>
-      <p>Enter the access token set on this station. The token stays in an HTTP-only session cookie.</p>
+      <p>Enter this station’s access token to view reports and run drive tests.</p>
       <form id="login-form">
         <label for="token">Access token</label>
         <div class="field-row">
@@ -141,11 +141,13 @@
               <label for="discord-webhook">Discord webhook</label>
               <input id="discord-webhook" type="password" autocomplete="off" placeholder="Leave blank to keep the saved webhook">
               <p class="configured-note" id="discord-configured"></p>
+              <button type="button" class="forget-button" id="forget-discord" hidden>Forget saved Discord webhook</button>
             </div>
             <div id="telegram-fields" hidden>
               <label for="telegram-token">Telegram bot token</label>
               <input id="telegram-token" type="password" autocomplete="off" placeholder="Leave blank to keep the saved token">
               <p class="configured-note" id="telegram-configured"></p>
+              <button type="button" class="forget-button" id="forget-telegram" hidden>Forget saved Telegram credentials</button>
               <label for="telegram-chat">Telegram chat ID</label>
               <input id="telegram-chat" type="text" autocomplete="off">
             </div>

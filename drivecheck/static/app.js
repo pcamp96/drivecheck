@@ -13,9 +13,11 @@ const elements = {
   report: $("#report"), settingsForm: $("#settings-form"), autoTest: $("#auto-test"),
   notificationsEnabled: $("#notifications-enabled"), provider: $("#notification-provider"),
   discordFields: $("#discord-fields"), discordWebhook: $("#discord-webhook"),
-  discordConfigured: $("#discord-configured"), telegramFields: $("#telegram-fields"),
+  discordConfigured: $("#discord-configured"), forgetDiscord: $("#forget-discord"),
+  telegramFields: $("#telegram-fields"),
   telegramToken: $("#telegram-token"), telegramChat: $("#telegram-chat"),
-  telegramConfigured: $("#telegram-configured"), notifyStarted: $("#notify-started"),
+  telegramConfigured: $("#telegram-configured"), forgetTelegram: $("#forget-telegram"),
+  notifyStarted: $("#notify-started"),
   destructiveSetting: $("#destructive-setting"), hardwareSetting: $("#hardware-setting"),
   settingsStatus: $("#settings-status"), verifyDialog: $("#verify-dialog"),
   verifyForm: $("#verify-form"), verifyDriveName: $("#verify-drive-name"),
@@ -126,6 +128,10 @@ function connectEvents() {
       setStreamState("offline");
     }
   });
+  events.addEventListener("expired", () => {
+    showLogin();
+    elements.loginError.textContent = "Your session has ended. Sign in again.";
+  });
   events.onopen = () => setStreamState("live");
   events.onerror = () => {
     setStreamState("offline");
@@ -145,7 +151,8 @@ function activeRun() {
 function applySnapshot(next) {
   snapshot = next;
   showDashboard();
-  showError(next.system?.discovery_error || next.system?.notification_error || "");
+  const systemErrors = [next.system?.station_error, next.system?.discovery_error, next.system?.notification_error].filter(Boolean);
+  showError(systemErrors.join(" "));
   renderStation();
   renderActive();
   renderDrives();
@@ -339,6 +346,8 @@ function renderSettings(force = false) {
   elements.telegramToken.value = "";
   elements.discordConfigured.textContent = notifications.discord_configured ? "A webhook is saved." : "No webhook saved.";
   elements.telegramConfigured.textContent = notifications.telegram_configured ? "A bot token is saved." : "No bot token saved.";
+  elements.forgetDiscord.hidden = !notifications.discord_configured;
+  elements.forgetTelegram.hidden = !notifications.telegram_configured;
   elements.destructiveSetting.textContent = settings.allow_destructive ? "Enabled" : "Disabled";
   elements.hardwareSetting.textContent = snapshot.mode === "demo" ? "Simulated only" : "Enabled";
   showProviderFields();
@@ -454,6 +463,30 @@ $("#test-notification").addEventListener("click", async (event) => {
   catch (error) { elements.settingsStatus.textContent = error.message; toast(error.message, "error"); }
   finally { event.currentTarget.disabled = false; }
 });
+
+async function forgetCredentials(provider, button) {
+  button.disabled = true;
+  const label = provider === "discord" ? "Discord webhook" : "Telegram credentials";
+  try {
+    await api("/api/settings", {
+      method: "PUT",
+      body: { notifications: { enabled: false, [provider === "discord" ? "clear_discord" : "clear_telegram"]: true } }
+    });
+    settingsDirty = false;
+    await refreshState();
+    renderSettings(true);
+    elements.settingsStatus.textContent = `${label} removed.`;
+    toast(`${label} removed.`);
+  } catch (error) {
+    elements.settingsStatus.textContent = error.message;
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+elements.forgetDiscord.addEventListener("click", () => forgetCredentials("discord", elements.forgetDiscord));
+elements.forgetTelegram.addEventListener("click", () => forgetCredentials("telegram", elements.forgetTelegram));
 
 $("#date-line").textContent = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" }).format(new Date());
 

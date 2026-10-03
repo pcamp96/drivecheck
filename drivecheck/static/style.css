@@ -202,7 +202,7 @@ main > section { max-width: 1350px; margin: 0 auto 58px; scroll-margin-top: 28px
 .switch-row span { flex: 1; }
 .switch-row strong, .switch-row small { display: block; }
 .switch-row small { margin-top: 2px; color: var(--slate); font-weight: 400; }
-.switch-row input { position: absolute; opacity: 0; pointer-events: none; }
+.switch-row input { position: absolute; width: 1px; height: 1px; min-height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
 .switch-row i { flex: none; position: relative; width: 44px; height: 24px; border-radius: 20px; background: #aeb9c5; }
 .switch-row i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: white; transition: transform .18s; }
 .switch-row input:checked + i { background: var(--teal); }
@@ -214,6 +214,8 @@ main > section { max-width: 1350px; margin: 0 auto 58px; scroll-margin-top: 28px
 .check-row input { width: 17px; min-height: 17px; }
 .form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 19px; }
 .configured-note, .form-status { margin: 4px 0; color: var(--slate); font-size: 12px; }
+.forget-button { padding: 3px 0; color: var(--red); background: transparent; font-size: 12px; font-weight: 650; }
+.forget-button:hover:not(:disabled) { color: #841b13; background: transparent; text-decoration: underline; }
 
 dialog { width: min(520px, calc(100% - 28px)); padding: 0; border: 0; border-radius: 10px; color: var(--ink); box-shadow: 0 30px 90px rgba(14,28,45,.35); }
 dialog::backdrop { background: rgba(12,27,45,.7); backdrop-filter: blur(2px); }
