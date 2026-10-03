@@ -17,6 +17,7 @@ import signal
 import stat
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -130,7 +131,9 @@ class CommandRunner:
                 elif not callback_failure.cancelled():
                     callback_failure.exception()
             (stdout, out_cut), (stderr, err_cut) = await asyncio.gather(stdout_task, stderr_task)
-            return CommandResult(tuple(args), process.returncode or 0, stdout, stderr, out_cut or err_cut)
+            return CommandResult(
+                tuple(args), process.returncode or 0, stdout, stderr, out_cut or err_cut
+            )
 
     async def cancel(self) -> None:
         process = self._process
@@ -256,7 +259,9 @@ class Hardware:
             timeout=15,
         )
         if result.returncode:
-            raise CommandError(f"lsblk failed: {result.stderr.strip()}", returncode=result.returncode)
+            raise CommandError(
+                f"lsblk failed: {result.stderr.strip()}", returncode=result.returncode
+            )
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
@@ -356,7 +361,9 @@ class Hardware:
         return paths
 
     async def validate(self, drive: Drive, destructive: bool = False) -> Drive:
-        matches = [current for current in await self.discover() if current.identity == drive.identity]
+        matches = [
+            current for current in await self.discover() if current.identity == drive.identity
+        ]
         if len(matches) != 1:
             raise SafetyError("drive identity is missing or no longer unique")
         current = matches[0]
@@ -477,7 +484,11 @@ class Hardware:
             started = await self._runner.run("smartctl", "-t", "long", current.path, timeout=45)
             combined = f"{started.stdout}\n{started.stderr}".lower()
             if started.returncode & 0b00000111 or "unsupported" in combined:
-                return {"status": "unsupported", "detail": "Extended self-test is unsupported", "raw": {}}
+                return {
+                    "status": "unsupported",
+                    "detail": "Extended self-test is unsupported",
+                    "raw": {},
+                }
             await progress(0, "Extended SMART self-test started")
             deadline = time.monotonic() + self.self_test_timeout_seconds
             observed_running = False
@@ -619,7 +630,9 @@ class Hardware:
     ) -> dict[str, Any]:
         current = await self.validate(drive, destructive=destructive)
         if self.demo:
-            label = "Destructive write and checksum verification" if destructive else "Full read scan"
+            label = (
+                "Destructive write and checksum verification" if destructive else "Full read scan"
+            )
             for percent in (0, 12, 39, 73, 100):
                 await progress(percent, label)
                 await asyncio.sleep(self.demo_step_seconds)
@@ -651,6 +664,34 @@ class Hardware:
         )
 
     async def _fio(
+        self,
+        drive: Drive,
+        progress: Progress,
+        *,
+        destructive: bool,
+        args: tuple[str, ...],
+        detail: str,
+        benchmark: bool,
+        timeout: float,
+        expected_bytes: int,
+    ) -> dict[str, Any]:
+        current = await self.validate(drive, destructive=destructive)
+        # Linux O_EXCL on a block device rejects an already mounted/in-use
+        # target and holds an exclusive claim that prevents a new mount while
+        # fio is active. fio itself uses a non-exclusive device open.
+        with self._exclusive_claim(current.path):
+            return await self._fio_claimed(
+                current,
+                progress,
+                destructive=destructive,
+                args=args,
+                detail=detail,
+                benchmark=benchmark,
+                timeout=timeout,
+                expected_bytes=expected_bytes,
+            )
+
+    async def _fio_claimed(
         self,
         drive: Drive,
         progress: Progress,
@@ -712,7 +753,9 @@ class Hardware:
         if not destructive:
             command_parts.append("--readonly")
         command = (*command_parts, *args)
-        io_task = asyncio.create_task(self._runner.run(*command, timeout=timeout, stdout_chunk=parse_status))
+        io_task = asyncio.create_task(
+            self._runner.run(*command, timeout=timeout, stdout_chunk=parse_status)
+        )
         safety_error: SafetyError | CommandError | None = None
         try:
             while not io_task.done():
@@ -735,7 +778,11 @@ class Hardware:
         if safety_error is not None:
             return {"status": "incomplete", "detail": str(safety_error), "raw": {}}
         if stream_invalid:
-            return {"status": "incomplete", "detail": "fio status output exceeded safety limits", "raw": {}}
+            return {
+                "status": "incomplete",
+                "detail": "fio status output exceeded safety limits",
+                "raw": {},
+            }
         try:
             raw = latest_snapshot or self._json_documents(result.stdout)[-1]
         except (json.JSONDecodeError, IndexError):
@@ -795,6 +842,22 @@ class Hardware:
         return device_stat.st_rdev
 
     @staticmethod
+    @contextmanager
+    def _exclusive_claim(path: str):
+        flags = os.O_RDONLY | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | os.O_CLOEXEC
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise SafetyError("could not claim the unmounted block device exclusively") from exc
+        try:
+            claimed_stat = os.fstat(descriptor)
+            if not stat.S_ISBLK(claimed_stat.st_mode):
+                raise SafetyError("claimed path is not a block device")
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
     def _fio_block_size(size_bytes: int, logical_sector: int) -> int:
         if logical_sector <= 0 or size_bytes <= 0 or size_bytes % logical_sector:
             raise SafetyError("drive size is not aligned to its logical sector size")
@@ -830,9 +893,7 @@ class Hardware:
         read_bytes = sum(int(job.get("read", {}).get("io_bytes") or 0) for job in jobs)
         write_bytes = sum(int(job.get("write", {}).get("io_bytes") or 0) for job in jobs)
         if benchmark:
-            runtime = max(
-                (int(job.get("read", {}).get("runtime") or 0) for job in jobs), default=0
-            )
+            runtime = max((int(job.get("read", {}).get("runtime") or 0) for job in jobs), default=0)
             return max(0, min(99, int(runtime / 30_000 * 100)))
         denominator = expected_bytes * (2 if destructive else 1)
         return max(0, min(99, int((read_bytes + write_bytes) / denominator * 100)))

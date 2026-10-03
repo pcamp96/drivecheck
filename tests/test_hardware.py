@@ -5,6 +5,7 @@ import builtins
 import json
 import sys
 from collections import deque
+from contextlib import nullcontext
 
 import pytest
 
@@ -101,6 +102,7 @@ def discovery(hardware: Hardware, *payloads: dict[str, object]) -> FakeRunner:
 @pytest.fixture(autouse=True)
 def fake_block_device(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Hardware, "_pin_device", staticmethod(lambda _: 2049))
+    monkeypatch.setattr(Hardware, "_exclusive_claim", staticmethod(lambda _: nullcontext()))
 
 
 @pytest.mark.asyncio
@@ -115,7 +117,9 @@ async def test_demo_never_runs_host_commands() -> None:
 
 
 @pytest.mark.asyncio
-async def test_discovery_allows_only_unique_unmounted_serial_usb(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_discovery_allows_only_unique_unmounted_serial_usb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     hardware = Hardware(demo=False)
     root_child = {
         "name": "mmcblk0p2",
@@ -264,7 +268,9 @@ async def test_self_test_polls_to_terminal_failure(monkeypatch: pytest.MonkeyPat
     previous = {
         "smart_status": {"passed": True},
         "ata_smart_self_test_log": {
-            "standard": {"table": [{"status": {"string": "Completed without error"}, "lifetime_hours": 10}]}
+            "standard": {
+                "table": [{"status": {"string": "Completed without error"}, "lifetime_hours": 10}]
+            }
         },
     }
     discovery(hardware, *(lsblk(disk()) for _ in range(7)))
@@ -355,7 +361,11 @@ async def test_self_test_timeout_aborts_only_after_identity_check(
     initial = {"smart_status": {"passed": True}}
     discovery(hardware, *(lsblk(disk()) for _ in range(4)))
     operation = FakeRunner(
-        [result(("smartctl",), initial), CommandResult(("smartctl",), 0, "started", ""), CommandResult(("smartctl",), 0, "", "")]
+        [
+            result(("smartctl",), initial),
+            CommandResult(("smartctl",), 0, "started", ""),
+            CommandResult(("smartctl",), 0, "", ""),
+        ]
     )
     hardware._runner = operation
     hardware.self_test_poll_seconds = 1
@@ -374,13 +384,10 @@ async def test_self_test_timeout_aborts_only_after_identity_check(
 @pytest.mark.asyncio
 async def test_fio_revalidates_after_io(monkeypatch: pytest.MonkeyPatch) -> None:
     hardware = Hardware(demo=False)
-    fio = {
-        "jobs": [
-            {"error": 0, "read": {"bw_bytes": 150_000_000, "io_bytes": 1_000_000_000}}
-        ]
-    }
+    fio = {"jobs": [{"error": 0, "read": {"bw_bytes": 150_000_000, "io_bytes": 1_000_000_000}}]}
     discovery(
         hardware,
+        lsblk(disk()),
         lsblk(disk()),
         lsblk(disk()),
         lsblk(disk()),
@@ -408,6 +415,7 @@ async def test_fio_safety_poll_cancels_when_drive_becomes_mounted(
         lsblk(disk()),
         lsblk(disk()),
         lsblk(disk()),
+        lsblk(disk()),
         lsblk(disk(mounts=["/mnt/surprise"])),
     )
     operation = BlockingRunner()
@@ -430,7 +438,7 @@ async def test_fio_task_cancellation_does_not_orphan_child(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     hardware = Hardware(demo=False)
-    discovery(hardware, *(lsblk(disk()) for _ in range(3)))
+    discovery(hardware, *(lsblk(disk()) for _ in range(4)))
     operation = BlockingRunner()
     hardware._runner = operation
     monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
@@ -448,7 +456,9 @@ async def test_fio_task_cancellation_does_not_orphan_child(
 
 
 @pytest.mark.asyncio
-async def test_destructive_surface_uses_checksum_and_read_write(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_destructive_surface_uses_checksum_and_read_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     hardware = Hardware(demo=False)
     fio = {
         "jobs": [
@@ -459,7 +469,7 @@ async def test_destructive_surface_uses_checksum_and_read_write(monkeypatch: pyt
             }
         ]
     }
-    discovery(hardware, *(lsblk(disk()) for _ in range(4)))
+    discovery(hardware, *(lsblk(disk()) for _ in range(5)))
     hardware._runner = FakeRunner([result(("fio",), fio)])
     monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
     drive = (await hardware.discover())[0]
@@ -486,7 +496,7 @@ async def test_full_surface_selects_aligned_block_size_for_non_mib_drive(
     odd = disk()
     odd["size"] = odd_size
     raw = {"jobs": [{"error": 0, "read": {"io_bytes": odd_size}}]}
-    discovery(hardware, *(lsblk(odd) for _ in range(4)))
+    discovery(hardware, *(lsblk(odd) for _ in range(5)))
     hardware._runner = FakeRunner([result(("fio",), raw)])
     monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
     drive = (await hardware.discover())[0]
@@ -516,7 +526,7 @@ async def test_fio_concatenated_json_reports_progress_and_requires_coverage(
         ]
     }
     joined = json.dumps(halfway) + "\n" + json.dumps(final)
-    discovery(hardware, *(lsblk(disk()) for _ in range(4)))
+    discovery(hardware, *(lsblk(disk()) for _ in range(5)))
     hardware._runner = FakeRunner([CommandResult(("fio",), 0, joined, "")])
     monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
     drive = (await hardware.discover())[0]
@@ -545,7 +555,7 @@ async def test_fio_uses_latest_streamed_json_when_retained_output_is_truncated(
             }
         ]
     }
-    discovery(hardware, *(lsblk(disk()) for _ in range(4)))
+    discovery(hardware, *(lsblk(disk()) for _ in range(5)))
     hardware._runner = StreamingRunner(json.dumps(early), json.dumps(final))
     monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
     drive = (await hardware.discover())[0]
@@ -562,7 +572,7 @@ async def test_fio_uses_latest_streamed_json_when_retained_output_is_truncated(
 async def test_fio_zero_io_is_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
     hardware = Hardware(demo=False)
     raw = {"jobs": [{"error": 0, "read": {"io_bytes": 0, "bw_bytes": 0}}]}
-    discovery(hardware, *(lsblk(disk()) for _ in range(4)))
+    discovery(hardware, *(lsblk(disk()) for _ in range(5)))
     hardware._runner = FakeRunner([result(("fio",), raw)])
     monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
     drive = (await hardware.discover())[0]
