@@ -25,6 +25,8 @@ class Engine:
         self.telegram_error = None
         self.published = 0
         self.actions = []
+        self.erase_begins = []
+        self.erase_confirms = []
 
     def publish(self):
         self.published += 1
@@ -32,6 +34,20 @@ class Engine:
     async def choose_action(self, run_id, action):
         self.actions.append((run_id, action))
         return {"status": "accepted"}
+
+    async def begin_erase(self, run_id, profile, *, chat_id, user_id):
+        self.erase_begins.append((run_id, profile, chat_id, user_id))
+        return {
+            "intent_id": f"intent-{profile}",
+            "message": f"Confirm {profile}: reply with the exact phrase.",
+            "expires_in": 120,
+        }
+
+    async def confirm_erase(self, intent_id, confirmation, *, chat_id, user_id):
+        self.erase_confirms.append((intent_id, confirmation, chat_id, user_id))
+        if confirmation == "wrong":
+            raise ValueError("The erase phrase must match exactly")
+        return {"status": "queued"}
 
 
 def callback(update_id, *, action="extended", chat=-100, user=42, callback_id="callback"):
@@ -42,6 +58,19 @@ def callback(update_id, *, action="extended", chat=-100, user=42, callback_id="c
             "from": {"id": user, "username": "not-authority"},
             "message": {"chat": {"id": chat}},
             "data": f"dc:{RUN_ID}:{action}",
+        },
+    }
+
+
+def reply(update_id, prompt_id, text, *, chat=-100, user=42):
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": update_id + 1000,
+            "from": {"id": user},
+            "chat": {"id": chat},
+            "reply_to_message": {"message_id": prompt_id},
+            "text": text,
         },
     }
 
@@ -242,3 +271,182 @@ async def test_webhook_conflict_is_reported_without_token_or_provider_body():
     assert "webhook" in engine.telegram_error
     assert "another active poller" in engine.telegram_error
     assert "secret_token" not in engine.telegram_error
+
+
+async def test_erase_buttons_only_create_intent_until_authorized_prompt_reply():
+    engine = Engine()
+    sent = []
+    answers = []
+    next_message_id = 700
+
+    def handler(request):
+        nonlocal next_message_id
+        body = json.loads(request.content)
+        if request.url.path.endswith("/sendMessage"):
+            sent.append(body)
+            next_message_id += 1
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": next_message_id}})
+        answers.append(body)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    interface = TelegramInterface(engine, transport=httpx.MockTransport(handler))
+    settings = engine.settings.value["notifications"]
+    signature = ("123:secret_token", "-100", "42")
+
+    for index, profile in enumerate(("quick_erase", "full_erase"), 1):
+        confirms_before = len(engine.erase_confirms)
+        assert await interface._handle_update(
+            "123:secret_token",
+            settings,
+            callback(index, action=profile, callback_id=f"erase-{index}"),
+            signature,
+        )
+        assert len(engine.erase_confirms) == confirms_before
+        prompt_id = next_message_id
+        assert sent[-1]["reply_markup"] == {"force_reply": True, "selective": True}
+        assert answers[-1]["text"].startswith("Confirmation required")
+
+        # Only the configured principal replying to this bot prompt can advance it.
+        assert await interface._handle_update(
+            "123:secret_token", settings, reply(10, prompt_id, "phrase", chat=-999), signature
+        )
+        assert await interface._handle_update(
+            "123:secret_token", settings, reply(11, prompt_id, "phrase", user=99), signature
+        )
+        assert await interface._handle_update(
+            "123:secret_token", settings, reply(12, prompt_id + 1, "phrase"), signature
+        )
+        assert len(engine.erase_confirms) == confirms_before
+
+        assert await interface._handle_update(
+            "123:secret_token", settings, reply(13, prompt_id, "wrong"), signature
+        )
+        assert (-100, 42, prompt_id) in interface._pending
+        assert "did not match exactly" in sent[-1]["text"]
+
+        phrase = "QUICK ERASE SERIAL" if profile == "quick_erase" else "FULL ERASE SERIAL"
+        assert await interface._handle_update(
+            "123:secret_token", settings, reply(14, prompt_id, phrase), signature
+        )
+        assert (-100, 42, prompt_id) not in interface._pending
+        assert sent[-1]["text"].startswith("Erase requested")
+        confirms = len(engine.erase_confirms)
+        assert await interface._handle_update(
+            "123:secret_token", settings, reply(15, prompt_id, phrase), signature
+        )
+        assert len(engine.erase_confirms) == confirms
+
+    assert [call[1] for call in engine.erase_begins] == ["quick_erase", "full_erase"]
+
+
+async def test_pending_erase_expires_replaces_older_sender_prompt_and_clears_on_settings_change(
+    monkeypatch,
+):
+    now = 100.0
+    monkeypatch.setattr("drivecheck.telegram.time.monotonic", lambda: now)
+    engine = Engine()
+    message_id = 800
+
+    def handler(request):
+        nonlocal message_id
+        if request.url.path.endswith("/sendMessage"):
+            message_id += 1
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": message_id}})
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    interface = TelegramInterface(engine, transport=httpx.MockTransport(handler), poll_timeout=1)
+    settings = engine.settings.value["notifications"]
+    signature = ("123:secret_token", "-100", "42")
+    await interface._handle_update(
+        "123:secret_token", settings, callback(1, action="quick_erase"), signature
+    )
+    first_prompt = message_id
+    await interface._handle_update(
+        "123:secret_token", settings, callback(2, action="full_erase"), signature
+    )
+    assert (-100, 42, first_prompt) not in interface._pending
+    assert len(interface._pending) == 1
+    second_prompt = message_id
+    now += 121
+    await interface._handle_update(
+        "123:secret_token", settings, reply(3, second_prompt, "FULL ERASE SERIAL"), signature
+    )
+    assert interface._pending == {}
+    assert engine.erase_confirms == []
+
+    now = 300
+    await interface._handle_update(
+        "123:secret_token", settings, callback(4, action="quick_erase"), signature
+    )
+    assert interface._pending
+    engine.settings.value["notifications"]["telegram_token"] = "456:new_token"
+    interface._signature = signature
+
+    async def no_wait(_seconds):
+        return None
+
+    interface.sleep = no_wait
+    await interface.poll_once()
+    assert interface._pending == {}
+
+
+async def test_settings_revocation_during_erase_begin_or_confirm_sends_no_stale_reply():
+    engine = Engine()
+    provider_calls = []
+
+    def handler(request):
+        provider_calls.append(request.url.path)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 901}})
+
+    async def revoked_begin(run_id, profile, *, chat_id, user_id):
+        engine.settings.value["notifications"]["telegram_token"] = "456:new_token"
+        return {"intent_id": "intent", "message": "secret-free prompt", "expires_in": 120}
+
+    engine.begin_erase = revoked_begin
+    interface = TelegramInterface(engine, transport=httpx.MockTransport(handler))
+    settings = engine.settings.value["notifications"]
+    signature = ("123:secret_token", "-100", "42")
+    assert not await interface._handle_update(
+        "123:secret_token", settings, callback(1, action="quick_erase"), signature
+    )
+    assert provider_calls == [] and interface._pending == {}
+
+    engine = Engine()
+    provider_calls = []
+    interface = TelegramInterface(engine, transport=httpx.MockTransport(handler))
+    settings = engine.settings.value["notifications"]
+    await interface._handle_update(
+        "123:secret_token", settings, callback(2, action="quick_erase"), signature
+    )
+    prompt_id = next(iter(interface._pending))[2]
+    provider_calls.clear()
+
+    async def revoked_confirm(intent_id, confirmation, *, chat_id, user_id):
+        engine.settings.value["notifications"]["telegram_token"] = "456:new_token"
+        return {"status": "queued"}
+
+    engine.confirm_erase = revoked_confirm
+    assert not await interface._handle_update(
+        "123:secret_token", settings, reply(3, prompt_id, "QUICK ERASE SERIAL"), signature
+    )
+    assert provider_calls == [] and interface._pending == {}
+
+
+async def test_pending_prompt_memory_is_bounded_and_send_errors_are_sanitized():
+    engine = Engine()
+    interface = TelegramInterface(engine)
+    for user_id in range(1, 102):
+        interface._remember_prompt(-100, user_id, user_id, f"intent-{user_id}", 120)
+    assert len(interface._pending) == 100
+    assert (-100, 1, 1) not in interface._pending
+
+    def handler(_request):
+        return httpx.Response(
+            400,
+            json={"ok": False, "description": "secret_token and private provider detail"},
+        )
+
+    interface.transport = httpx.MockTransport(handler)
+    assert await interface._send("123:secret_token", -100, "Prompt") is None
+    assert engine.telegram_error == "Telegram did not confirm the interactive message."
+    assert "secret" not in engine.telegram_error

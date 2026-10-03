@@ -26,6 +26,14 @@ const elements = {
   verifyForm: $("#verify-form"), verifyDriveName: $("#verify-drive-name"),
   verifyPhrase: $("#verify-phrase"), verifyConfirmation: $("#verify-confirmation"),
   verifyError: $("#verify-error"), toasts: $("#toasts"),
+  takeControlDialog: $("#take-control-dialog"), takeControlForm: $("#take-control-form"),
+  takeControlDrive: $("#take-control-drive"), takeControlPhrase: $("#take-control-phrase"),
+  takeControlConfirmation: $("#take-control-confirmation"), takeControlError: $("#take-control-error"),
+  takeControlSubmit: $("#take-control-submit"),
+  eraseDialog: $("#erase-dialog"), eraseForm: $("#erase-form"), eraseTitle: $("#erase-title"),
+  eraseDrive: $("#erase-drive"), eraseMethod: $("#erase-method"), eraseDeadline: $("#erase-deadline"),
+  erasePhrase: $("#erase-phrase"), eraseConfirmation: $("#erase-confirmation"),
+  eraseError: $("#erase-error"), eraseSubmit: $("#erase-submit"),
   dashboardView: $("#dashboard-view"), settingsView: $("#settings"), pageTitle: $("#page-title")
 };
 
@@ -33,6 +41,9 @@ let snapshot = null;
 let events = null;
 let selectedRunId = null;
 let verifyDrive = null;
+let takeControlDrive = null;
+let eraseRequest = null;
+let eraseDeadlineTimer = null;
 let settingsDirty = false;
 let automationSaving = false;
 let reconnectTimer = null;
@@ -216,16 +227,17 @@ function renderStation() {
   elements.version.textContent = snapshot.version || "—";
 }
 
-const phaseOrder = ["smart_before", "self_test", "benchmark", "surface", "smart_after"];
+const phaseOrder = ["smart_before", "self_test", "benchmark", "surface", "smart_after", "erase"];
 
 function renderActive() {
   const run = activeRun() || awaitingActionRun();
   const awaiting = run?.workflow_status === "awaiting_action";
+  const firmwareErase = runEraseMethod(run) === "ata_secure_erase";
   if (!awaiting || chosenActionRunId !== run?.id) chosenActionRunId = null;
   const cancelHadFocus = document.activeElement === elements.cancelButton;
   elements.activeEmpty.hidden = Boolean(run);
   elements.activeContent.hidden = !run;
-  elements.cancelButton.hidden = !run || awaiting;
+  elements.cancelButton.hidden = !run || awaiting || firmwareErase;
   elements.awaitingAction.hidden = !awaiting;
   window.clearInterval(actionCountdownTimer);
   if (!run) {
@@ -249,9 +261,11 @@ function renderActive() {
     updateActionCountdown(run);
     actionCountdownTimer = window.setInterval(() => updateActionCountdown(run), 1000);
   }
-  const runPhases = run.profile === "quick"
-    ? ["smart_before", "benchmark", "smart_after"]
-    : phaseOrder;
+  const runPhases = ["quick_erase", "full_erase"].includes(run.profile)
+    ? ["erase"]
+    : run.profile === "quick"
+      ? ["smart_before", "benchmark", "smart_after"]
+      : phaseOrder.filter((phase) => phase !== "erase");
   const currentIndex = runPhases.indexOf(run.phase);
   elements.phaseTrack.querySelectorAll("li").forEach((item) => {
     const phase = item.dataset.phase;
@@ -287,16 +301,18 @@ function updateActionCountdown(run) {
 
 function renderDrives() {
   const drives = snapshot.drives || [];
-  const busy = Boolean(activeRun()) || Boolean(snapshot.system?.release_in_progress);
+  const busy = Boolean(activeRun()) || Boolean(awaitingActionRun()) || Boolean(snapshot.system?.release_in_progress);
   const capabilities = snapshot.system?.capabilities || {};
   const signature = JSON.stringify({
     busy,
+    awaitingDriveId: awaitingActionRun()?.drive_id || awaitingActionRun()?.drive?.identity || null,
     allowDestructive: Boolean(snapshot.settings?.allow_destructive),
     capabilities: snapshot.system?.capabilities,
     drives: drives.map((drive) => ({
       id: drive.id, path: drive.path, model: drive.model, serial: drive.serial,
       size_bytes: drive.size_bytes, transport: drive.transport, eligible: drive.eligible,
-      reasons: drive.reasons, identity: drive.identity, mounted: drive.mounted
+      reasons: drive.reasons, identity: drive.identity, mounted: drive.mounted,
+      ownership: drive.ownership
     }))
   });
   if (signature === driveRenderSignature) return;
@@ -307,6 +323,8 @@ function renderDrives() {
   elements.driveList.replaceChildren();
   elements.drivesEmpty.hidden = drives.length > 0;
   drives.forEach((drive) => {
+    const waiting = awaitingActionRun();
+    const awaitingThisDrive = Boolean(waiting && (waiting.drive_id === drive.id || waiting.drive?.identity === drive.identity));
     const card = document.createElement("article");
     card.className = `drive-card ${drive.eligible ? "" : "ineligible"}`;
     const main = document.createElement("div");
@@ -321,6 +339,7 @@ function renderDrives() {
     const state = document.createElement("div");
     state.append(textNode("div", drive.eligible ? "Ready to test" : "Unavailable", "eligibility"));
     if (drive.reasons?.length) state.append(textNode("p", drive.reasons.map(reasonLabel).join(" · "), "drive-reasons"));
+    const ownership = drive.ownership ? ownershipSummary(drive.ownership) : null;
     const actions = document.createElement("div");
     actions.className = "drive-actions";
     actions.append(
@@ -328,10 +347,22 @@ function renderDrives() {
       runButton("Extended test", drive, "extended", busy || capabilities.can_test === false),
       runButton("Erase + verify", drive, "verify", busy || !snapshot.settings?.allow_destructive || capabilities.can_verify === false, true)
     );
+    if (drive.eligible && capabilities.can_erase !== false) {
+      actions.append(
+        eraseButton("Quick erase", drive, "quick_erase", busy && !awaitingThisDrive),
+        eraseButton("Full erase", drive, "full_erase", busy && !awaitingThisDrive)
+      );
+    }
     if (drive.mounted && capabilities.can_unmount) actions.append(releaseButton("Unmount for testing", drive, "unmount", busy));
     if (!drive.mounted && drive.eligible && capabilities.can_eject) actions.append(releaseButton("Eject drive", drive, "eject", busy));
-    const help = textNode("p", "Quick: SMART snapshots + read benchmark. Extended: adds a long self-test + full read scan. Erase + verify: destructive full-drive write/read checks.", "profile-help");
-    card.append(main, capacity, connection, state, actions, help);
+    if (!drive.eligible && drive.ownership?.take_control_available) actions.append(takeControlButton(drive, busy));
+    const eraseAvailability = !snapshot.settings?.allow_destructive && drive.eligible && capabilities.can_erase !== false
+      ? " Quick erase and Full erase are disabled by the station’s destructive-operation setting."
+      : "";
+    const help = textNode("p", `Quick: SMART snapshots + read benchmark. Extended: adds a long self-test + full read scan. Erase + verify: destructive full-drive write/read checks.${eraseAvailability}`, "profile-help");
+    card.append(main, capacity, connection, state, actions);
+    if (ownership) card.append(ownership);
+    card.append(help);
     elements.driveList.append(card);
   });
   if (focusedAction && !busy) {
@@ -344,6 +375,7 @@ function renderDrives() {
 function reasonLabel(reason) {
   return ({
     mounted: "Mounted volumes: unmount before testing",
+    device_in_use: "The kernel has claimed this drive for RAID",
     missing_serial: "The USB bridge did not report a unique drive serial",
     ambiguous_serial: "Multiple serials reported; identity is ambiguous",
     duplicate_identity: "Duplicate drive identity reported by the adapter",
@@ -356,6 +388,40 @@ function reasonLabel(reason) {
     invalid_size: "Drive capacity could not be verified",
     invalid_logical_sector: "Logical sector size could not be verified"
   })[reason] || reason;
+}
+
+function ownershipSummary(ownership) {
+  const block = document.createElement("div");
+  block.className = "ownership-summary";
+  if (ownership.detail) block.append(textNode("p", ownership.detail));
+  (Array.isArray(ownership.arrays) ? ownership.arrays : []).forEach((array) => {
+    const path = array?.path || "RAID array";
+    const state = array?.state || "state unknown";
+    const members = Array.isArray(array?.members) ? array.members.join(", ") : (array?.members || "members not reported");
+    block.append(textNode("p", `${path} · ${state} · Members: ${members}`));
+  });
+  return block;
+}
+
+function takeControlButton(drive, busy) {
+  const button = textNode("button", "Take control", "quiet-button");
+  button.type = "button";
+  button.disabled = busy;
+  button.dataset.driveId = drive.id;
+  button.dataset.profile = "take-control";
+  button.addEventListener("click", () => openTakeControl(drive));
+  return button;
+}
+
+function eraseButton(label, drive, profile, busy) {
+  const button = textNode("button", label, "danger-outline");
+  button.type = "button";
+  button.dataset.driveId = drive.id;
+  button.dataset.profile = profile;
+  button.disabled = busy || !snapshot.settings?.allow_destructive;
+  if (!snapshot.settings?.allow_destructive) button.title = "Drive erase is disabled in the station configuration.";
+  button.addEventListener("click", () => openErase(drive, profile));
+  return button;
 }
 
 function runButton(label, drive, profile, extraDisabled, destructive = false) {
@@ -387,7 +453,7 @@ function releaseButton(label, drive, action, busy) {
 }
 
 function profileLabel(profile) {
-  return ({ quick: "Quick", extended: "Extended", verify: "Erase + verify" })[profile] || profile || "Unknown";
+  return ({ quick: "Quick", extended: "Extended", verify: "Erase + verify", quick_erase: "Quick erase", full_erase: "Full erase" })[profile] || profile || "Unknown";
 }
 
 function statusLabel(status) {
@@ -396,7 +462,37 @@ function statusLabel(status) {
 }
 
 function phaseLabel(phase) {
-  return ({ queued: "Waiting to start", smart_before: "Checking drive health", self_test: "Running drive self-test", benchmark: "Measuring read performance", surface: "Scanning the full surface", smart_after: "Checking final drive health" })[phase] || phase || "Preparing";
+  return ({ queued: "Waiting to start", smart_before: "Checking drive health", self_test: "Running drive self-test", benchmark: "Measuring read performance", surface: "Scanning the full surface", smart_after: "Checking final drive health", erase: "Erasing the drive" })[phase] || phase || "Preparing";
+}
+
+function runEraseMethod(run) {
+  return run?.erase_method || run?.expected_method || run?.results?.erase?.method || run?.results?.erase?.actual_method || null;
+}
+
+function eraseMethodLabel(method) {
+  return ({
+    ata_secure_erase: "ATA firmware Secure Erase",
+    quick_format_exfat: "Quick Format (exFAT)",
+    full_overwrite: "Complete overwrite"
+  })[method] || method || "Method not reported";
+}
+
+function appendEraseEvidence(body, value) {
+  const method = value.method || value.actual_method;
+  const recoveryState = value.recovery_state || value.recovery || "Not reported";
+  const warning = value.recovery_required || method === "quick_format_exfat";
+  const overview = document.createElement("div");
+  overview.className = `diagnostic-summary ${warning ? "warning" : (value.status || "passed")}`;
+  overview.append(
+    textNode("strong", eraseMethodLabel(method)),
+    textNode("p", warning
+      ? "This Quick Format is not secure. Old files may still be recoverable until their blocks are overwritten."
+      : (method === "full_overwrite"
+        ? "DriveCheck overwrote the complete addressable drive."
+        : "The drive performed its firmware Secure Erase command."))
+  );
+  body.append(overview, evidenceRow("Actual erase method", eraseMethodLabel(method)), evidenceRow("Recovery state", recoveryState));
+  if (value.detail) body.append(textNode("p", value.detail, "result-detail"));
 }
 
 function objectValue(value) {
@@ -728,7 +824,7 @@ function renderReport(run) {
   const results = document.createElement("div");
   results.className = "result-list";
   const resultMap = run.results || {};
-  const labels = { smart_before: "Initial SMART health", self_test: "Drive self-test", benchmark: "Read benchmark", surface: "Surface test", smart_after: "Final SMART health" };
+  const labels = { smart_before: "Initial SMART health", self_test: "Drive self-test", benchmark: "Read benchmark", surface: "Surface test", smart_after: "Final SMART health", erase: "Drive erase" };
   Object.keys(labels).forEach((key) => {
     const value = resultMap[key];
     if (value == null) return;
@@ -741,7 +837,9 @@ function renderReport(run) {
     summaryLine.append(textNode("span", labels[key]), textNode("span", statusLabel(resultStatus), `status-pill ${resultStatus}`));
     const body = document.createElement("div");
     body.className = "result-body";
-    if (key === "smart_before" || key === "smart_after" || key === "self_test") {
+    if (key === "erase") {
+      appendEraseEvidence(body, value);
+    } else if (key === "smart_before" || key === "smart_after" || key === "self_test") {
       appendSmartEvidence(body, value, key);
     } else {
       if (value.read_mbps != null) body.append(textNode("p", `${Number(value.read_mbps).toFixed(1)} MB/s sequential read`));
@@ -850,6 +948,104 @@ function openVerify(drive) {
   elements.verifyConfirmation.focus();
 }
 
+function openTakeControl(drive) {
+  takeControlDrive = Object.freeze({
+    id: drive.id,
+    model: drive.model || "Unknown drive",
+    serial: drive.serial || "",
+    size_bytes: drive.size_bytes
+  });
+  const phrase = `TAKE CONTROL ${takeControlDrive.serial}`;
+  elements.takeControlDrive.textContent = `${takeControlDrive.model} · ${takeControlDrive.serial || "Serial unavailable"} · ${formatBytes(takeControlDrive.size_bytes)}`;
+  elements.takeControlPhrase.textContent = phrase;
+  elements.takeControlConfirmation.value = "";
+  elements.takeControlError.textContent = "";
+  elements.takeControlSubmit.disabled = false;
+  elements.takeControlDialog.showModal();
+  elements.takeControlConfirmation.focus();
+}
+
+function closeTakeControl() {
+  elements.takeControlDialog.close();
+  elements.takeControlError.textContent = "";
+  elements.takeControlConfirmation.value = "";
+  takeControlDrive = null;
+}
+
+function updateEraseDeadline() {
+  if (!eraseRequest) return;
+  const waiting = awaitingActionRun();
+  const sameDrive = waiting && (waiting.drive_id === eraseRequest.id || waiting.drive?.identity === eraseRequest.identity);
+  const deadline = new Date(sameDrive ? waiting.lifecycle?.action_deadline || "" : "");
+  if (!sameDrive || !Number.isFinite(deadline.valueOf())) {
+    elements.eraseDeadline.textContent = "";
+    return;
+  }
+  const remaining = Math.max(0, Math.ceil((deadline.valueOf() - Date.now()) / 1000));
+  elements.eraseDeadline.textContent = remaining
+    ? `Quick choice window: ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")} remaining. Opening this dialog does not pause the timer.`
+    : "The Quick choice window has ended. The server will refuse a stale erase request.";
+}
+
+async function openErase(drive, profile) {
+  const request = Object.freeze({
+    id: drive.id,
+    identity: drive.identity,
+    model: drive.model || "Unknown drive",
+    serial: drive.serial || "",
+    size_bytes: drive.size_bytes,
+    profile,
+    method: null
+  });
+  eraseRequest = request;
+  const quick = profile === "quick_erase";
+  const phrase = `${quick ? "QUICK ERASE" : "FULL ERASE"} ${request.serial}`;
+  elements.eraseTitle.textContent = quick ? "Quick erase this drive?" : "Fully erase this drive?";
+  elements.eraseDrive.textContent = `${request.model} · ${request.serial || "Serial unavailable"} · ${formatBytes(request.size_bytes)}`;
+  elements.erasePhrase.textContent = phrase;
+  elements.eraseConfirmation.value = "";
+  elements.eraseError.textContent = "";
+  elements.eraseMethod.className = "erase-method";
+  elements.eraseMethod.textContent = "Checking the available erase method…";
+  elements.eraseSubmit.disabled = true;
+  elements.eraseSubmit.textContent = quick ? "Quick erase" : "Full erase";
+  elements.eraseDialog.showModal();
+  updateEraseDeadline();
+  window.clearInterval(eraseDeadlineTimer);
+  eraseDeadlineTimer = window.setInterval(updateEraseDeadline, 1000);
+  try {
+    const plan = await api(`/api/drives/${encodeURIComponent(request.id)}/erase-plan`);
+    if (eraseRequest !== request) return;
+    const option = quick ? plan.quick : plan.full;
+    if (!option?.available || !option.method) {
+      elements.eraseMethod.textContent = option?.detail || "This erase method is not available for the drive.";
+      elements.eraseError.textContent = "Erase is unavailable.";
+      return;
+    }
+    eraseRequest = Object.freeze({ ...request, method: option.method });
+    const estimate = option.estimated_minutes != null ? ` Estimated time: about ${option.estimated_minutes} minutes.` : "";
+    if (option.method === "quick_format_exfat" || option.secure === false) {
+      elements.eraseMethod.className = "erase-method warning";
+      elements.eraseMethod.textContent = `${eraseMethodLabel(option.method)}. NOT SECURE: old files may be recoverable.${estimate} ${option.detail || ""}`.trim();
+    } else {
+      elements.eraseMethod.textContent = `${eraseMethodLabel(option.method)}.${estimate} ${option.detail || ""}`.trim();
+    }
+    elements.eraseSubmit.disabled = false;
+    elements.eraseConfirmation.focus();
+  } catch (error) {
+    if (eraseRequest === request) elements.eraseError.textContent = error.message;
+  }
+}
+
+function closeErase() {
+  elements.eraseDialog.close();
+  window.clearInterval(eraseDeadlineTimer);
+  eraseDeadlineTimer = null;
+  eraseRequest = null;
+  elements.eraseError.textContent = "";
+  elements.eraseConfirmation.value = "";
+}
+
 elements.loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   elements.loginError.textContent = "";
@@ -921,6 +1117,81 @@ elements.verifyForm.addEventListener("submit", async (event) => {
 
 $("#verify-close").addEventListener("click", () => elements.verifyDialog.close());
 $("#verify-cancel").addEventListener("click", () => elements.verifyDialog.close());
+
+elements.takeControlConfirmation.addEventListener("input", () => {
+  elements.takeControlError.textContent = "";
+});
+elements.takeControlForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!takeControlDrive) return;
+  const drive = takeControlDrive;
+  const phrase = `TAKE CONTROL ${drive.serial}`;
+  if (elements.takeControlConfirmation.value !== phrase) {
+    elements.takeControlError.textContent = `Enter “${phrase}” exactly.`;
+    elements.takeControlConfirmation.focus();
+    return;
+  }
+  elements.takeControlSubmit.disabled = true;
+  elements.takeControlError.textContent = "";
+  try {
+    const result = await api(`/api/drives/${encodeURIComponent(drive.id)}/take-control`, {
+      method: "POST",
+      body: { confirmation: phrase }
+    });
+    selectedRunId = result.run?.id || selectedRunId;
+    closeTakeControl();
+    focusActiveRunOnRender = true;
+    toast(result.detail || "Inactive RAID claim released. Read-only Quick test queued.");
+    await refreshState();
+    document.querySelector("#active").scrollIntoView({ behavior: "smooth" });
+  } catch (error) {
+    elements.takeControlError.textContent = error.message;
+  } finally {
+    elements.takeControlSubmit.disabled = false;
+  }
+});
+$("#take-control-close").addEventListener("click", closeTakeControl);
+$("#take-control-cancel").addEventListener("click", closeTakeControl);
+
+elements.eraseConfirmation.addEventListener("input", () => {
+  elements.eraseError.textContent = "";
+});
+elements.eraseForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!eraseRequest?.method) return;
+  const request = eraseRequest;
+  const phrase = `${request.profile === "quick_erase" ? "QUICK ERASE" : "FULL ERASE"} ${request.serial}`;
+  if (elements.eraseConfirmation.value !== phrase) {
+    elements.eraseError.textContent = `Enter “${phrase}” exactly.`;
+    elements.eraseConfirmation.focus();
+    return;
+  }
+  elements.eraseSubmit.disabled = true;
+  elements.eraseError.textContent = "";
+  try {
+    const result = await api(`/api/drives/${encodeURIComponent(request.id)}/erase`, {
+      method: "POST",
+      body: { profile: request.profile, confirmation: phrase, expected_method: request.method }
+    });
+    selectedRunId = result.run?.id || selectedRunId;
+    closeErase();
+    focusActiveRunOnRender = Boolean(result.run);
+    toast(result.detail || `${profileLabel(request.profile)} queued.`);
+    await refreshState();
+    document.querySelector("#active").scrollIntoView({ behavior: "smooth" });
+  } catch (error) {
+    elements.eraseError.textContent = error.message;
+    updateEraseDeadline();
+  } finally {
+    if (eraseRequest) elements.eraseSubmit.disabled = false;
+  }
+});
+$("#erase-close").addEventListener("click", closeErase);
+$("#erase-cancel").addEventListener("click", closeErase);
+elements.eraseDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeErase();
+});
 
 elements.settingsForm.addEventListener("input", (event) => {
   if (![elements.autoTest, elements.autoEject, elements.autoEjectDelay].includes(event.target)) settingsDirty = true;

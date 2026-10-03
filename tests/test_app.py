@@ -339,3 +339,67 @@ def test_drive_release_authenticated_and_blocked_during_work(tmp_path):
             time.sleep(0.01)
         assert client.post(endpoint, headers=AUTH).status_code == 200
         assert hardware.released == 1
+
+
+def test_take_control_requires_auth_and_exact_confirmation_input(tmp_path):
+    application = app(tmp_path)
+    with TestClient(application) as client:
+        path = "/api/drives/drive-123/take-control"
+        assert client.post(path, json={"confirmation": "TAKE CONTROL SERIAL"}).status_code == 401
+        assert client.post(path, headers=AUTH, json={"confirmation": True}).status_code == 422
+        assert (
+            client.post(
+                path, headers=AUTH, json={"confirmation": "TAKE CONTROL SERIAL", "force": True}
+            ).status_code
+            == 422
+        )
+        application.state.engine.take_control = AsyncMock(
+            return_value={
+                "status": "released",
+                "detail": "Released stale RAID",
+                "run": {"profile": "quick"},
+            }
+        )
+        result = client.post(path, headers=AUTH, json={"confirmation": "TAKE CONTROL SERIAL"})
+        assert result.status_code == 200 and result.json()["run"]["profile"] == "quick"
+        application.state.engine.take_control.assert_awaited_once_with(
+            "drive-123", "TAKE CONTROL SERIAL"
+        )
+        application.state.engine.take_control = AsyncMock(side_effect=ValueError("Array is active"))
+        assert (
+            client.post(
+                path, headers=AUTH, json={"confirmation": "TAKE CONTROL SERIAL"}
+            ).status_code
+            == 409
+        )
+
+
+def test_erase_routes_require_authentication_and_method_bound_serial_confirmation(tmp_path):
+    application = app(tmp_path, allow_destructive=True)
+    with TestClient(application) as client:
+        drive = client.get("/api/state", headers=AUTH).json()["drives"][0]
+        path = f"/api/drives/{drive['id']}"
+        assert client.get(path + "/erase-plan").status_code == 401
+        assert client.post(path + "/erase", json={}).status_code == 401
+        plan = client.get(path + "/erase-plan", headers=AUTH).json()
+        body = {
+            "profile": "quick_erase",
+            "confirmation": "WRONG",
+            "expected_method": plan["quick"]["method"],
+        }
+        assert client.post(path + "/erase", headers=AUTH, json=body).status_code == 409
+        body["confirmation"] = f"QUICK ERASE {drive['serial']}"
+        body["expected_method"] = "ata_secure_erase"
+        assert client.post(path + "/erase", headers=AUTH, json=body).status_code == 409
+        body["expected_method"] = plan["quick"]["method"]
+        response = client.post(path + "/erase", headers=AUTH, json=body)
+        assert response.status_code == 200
+        run = wait_finished(client, response.json()["run"]["id"])
+        assert run["profile"] == "quick_erase" and not run["automatic"]
+        assert set(run["results"]) == {"erase"}
+        assert (
+            client.post(
+                "/api/runs", headers=AUTH, json={"drive_id": drive["id"], "profile": "full_erase"}
+            ).status_code
+            == 422
+        )

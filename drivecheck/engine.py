@@ -3,6 +3,8 @@
 import asyncio
 import contextlib
 import copy
+import hashlib
+import secrets
 import shutil
 import time
 import uuid
@@ -16,7 +18,8 @@ from drivecheck.storage import Store
 from drivecheck.telegram import TelegramInterface
 
 TERMINAL = {"passed", "warning", "failed", "incomplete", "cancelled"}
-PROFILES = {"quick", "extended", "verify"}
+ERASE_PROFILES = {"quick_erase", "full_erase"}
+PROFILES = {"quick", "extended", "verify", *ERASE_PROFILES}
 AUTO_DETACH_SCANS = 2
 BUSY_WORKFLOWS = {"finishing", "awaiting_action"}
 
@@ -64,6 +67,7 @@ class Engine:
         self.telegram_error: str | None = None
         self.access_links = AccessLinks(config)
         self.action_waits: dict[str, dict] = {}
+        self.erase_intents: dict[str, dict] = {}
         self.enqueue_lock = asyncio.Lock()
         self.scan_lock = asyncio.Lock()
         self.notice_event = asyncio.Event()
@@ -155,6 +159,7 @@ class Engine:
                 "platform": "demo" if self.config.demo else "unknown",
                 "can_test": True,
                 "can_verify": bool(self.config.allow_destructive),
+                "can_erase": bool(self.config.allow_destructive),
                 "can_unmount": False,
                 "can_eject": False,
                 "tools": self.tools,
@@ -166,6 +171,7 @@ class Engine:
             capabilities = dict(capabilities)
             capabilities["can_test"] = True
             capabilities["can_verify"] = bool(self.config.allow_destructive)
+            capabilities["can_erase"] = bool(self.config.allow_destructive)
         return capabilities
 
     def _validate_headless_startup(self) -> None:
@@ -239,6 +245,7 @@ class Engine:
         async with self.scan_lock:
             try:
                 self.drives = await self.hardware.discover()
+                self._mark_erase_recovery()
                 self.discovery_error = None
                 identities = {drive.identity for drive in self.drives}
                 for identity in tuple(self.auto_attempted):
@@ -289,6 +296,187 @@ class Engine:
             await asyncio.sleep(self.config.scan_interval)
             await self.scan()
 
+    def _recovery_pending(self, drive: Drive) -> bool:
+        return (self.config.data_dir / "erase-recovery" / f"{drive.identity}.json").exists()
+
+    def _mark_erase_recovery(self) -> None:
+        for drive in self.drives:
+            if self._recovery_pending(drive):
+                drive.eligible = False
+                if "erase_recovery_required" not in drive.reasons:
+                    drive.reasons.append("erase_recovery_required")
+                drive.ownership = {
+                    "take_control_available": False,
+                    "arrays": [],
+                    "detail": "An interrupted firmware erase needs operator recovery. Do not power off the drive or start another job.",
+                }
+
+    async def erase_plan(self, drive_id: str) -> dict:
+        drive = next((item for item in self.drives if item.id == drive_id), None)
+        if drive is None or self._recovery_pending(drive):
+            raise ValueError("Drive is missing or needs firmware erase recovery")
+        if not self.capabilities.get("can_erase"):
+            raise ValueError("Erase is unavailable on this station")
+        return await self.hardware.erase_plan(drive)
+
+    def _erase_phrase(self, profile: str, serial: str) -> str:
+        return ("QUICK ERASE " if profile == "quick_erase" else "FULL ERASE ") + serial
+
+    def _telegram_authority(self, chat_id: int, user_id: int) -> str:
+        notice = self.settings.value["notifications"]
+        chat = str(notice.get("telegram_chat_id", ""))
+        sender = str(notice.get("telegram_user_id", "")) or chat
+        if (
+            not notice.get("enabled")
+            or notice.get("provider") != "telegram"
+            or chat != str(chat_id)
+            or sender != str(user_id)
+            or user_id <= 0
+        ):
+            raise ValueError("Telegram erase authorization is no longer valid")
+        return hashlib.sha256(str(notice.get("telegram_token", "")).encode()).hexdigest()
+
+    async def begin_erase(self, run_id: str, profile: str, *, chat_id: int, user_id: int) -> dict:
+        authority = self._telegram_authority(chat_id, user_id)
+        run = self.store.get(run_id)
+        if profile not in ERASE_PROFILES or not run or not self.config.allow_destructive:
+            raise ValueError("Manual erase is disabled or this action is invalid")
+        drive = next(
+            (item for item in self.drives if item.identity == run["drive"]["identity"]), None
+        )
+        if drive is None or drive.path != run["drive"]["path"] or not drive.eligible:
+            raise ValueError("The original drive is no longer available for erasing")
+        plan = (await self.erase_plan(drive.id))["quick" if profile == "quick_erase" else "full"]
+        if not plan.get("available"):
+            raise ValueError(plan.get("detail", "This erase method is unavailable"))
+        if authority != self._telegram_authority(chat_id, user_id):
+            raise ValueError("Telegram erase authorization changed")
+        wait = self.action_waits.get(run_id)
+        if run.get("workflow_status") in BUSY_WORKFLOWS and not wait:
+            raise ValueError("Wait for the current job and safe release")
+        deadline = min(time.monotonic() + 120, wait["deadline"] if wait else float("inf"))
+        if deadline <= time.monotonic() or (wait and wait["event"].is_set()):
+            raise ValueError("The drive's action window has expired")
+        # Bound memory and replace the sender's older pending confirmation.
+        for key, intent in list(self.erase_intents.items()):
+            if intent["deadline"] <= time.monotonic() or intent["principal"] == (chat_id, user_id):
+                self.erase_intents.pop(key, None)
+        if len(self.erase_intents) >= 100:
+            self.erase_intents.pop(next(iter(self.erase_intents)))
+        intent_id = secrets.token_urlsafe(24)
+        self.erase_intents[intent_id] = {
+            "drive": drive.to_dict(),
+            "profile": profile,
+            "method": plan["method"],
+            "principal": (chat_id, user_id),
+            "authority": authority,
+            "deadline": deadline,
+            "waiting_run": run_id if wait else None,
+        }
+        phrase = self._erase_phrase(profile, drive.serial)
+        seconds = max(0, int(deadline - time.monotonic()))
+        message = f"DriveCheck: confirm {profile.replace('_', ' ')}\n{drive.model} | Serial: {drive.serial} | Capacity: {drive.size_bytes / 1e12:.2f} TB\nMethod: {plan['detail']}\nAll existing data on this drive will be lost."
+        if plan["method"] == "quick_format_exfat":
+            message += (
+                "\nQuick format is NOT secure erasure; old file contents may remain recoverable."
+            )
+        message += f"\nReply to this message with exactly: {phrase}\nExpires in {seconds} seconds. The automatic eject countdown continues."
+        return {"intent_id": intent_id, "message": message, "expires_in": seconds}
+
+    async def confirm_erase(
+        self, intent_id: str, confirmation: str, *, chat_id: int, user_id: int
+    ) -> dict:
+        intent = self.erase_intents.get(intent_id)
+        if not intent or intent["deadline"] <= time.monotonic():
+            self.erase_intents.pop(intent_id, None)
+            raise ValueError("Erase confirmation expired. Choose the action again.")
+        if intent["principal"] != (chat_id, user_id) or intent[
+            "authority"
+        ] != self._telegram_authority(chat_id, user_id):
+            raise ValueError("Erase confirmation is not authorized")
+        if confirmation != self._erase_phrase(intent["profile"], intent["drive"]["serial"]):
+            raise ValueError("The erase phrase must match exactly")
+        response = await self.request_erase(
+            intent["drive"]["id"], intent["profile"], confirmation, intent["method"], intent=intent
+        )
+        self.erase_intents.pop(intent_id, None)
+        return response
+
+    async def request_erase(
+        self,
+        drive_id: str,
+        profile: str,
+        confirmation: str,
+        expected_method: str,
+        *,
+        intent: dict | None = None,
+    ) -> dict:
+        if profile not in ERASE_PROFILES or not self.config.allow_destructive:
+            raise ValueError("Manual erase is disabled in station configuration")
+        if self.stopping or not self.capabilities.get("can_erase"):
+            raise ValueError("Erase is unavailable on this station")
+        async with self.enqueue_lock:
+            drive = next((item for item in self.drives if item.id == drive_id), None)
+            if not drive or self._recovery_pending(drive):
+                raise ValueError("Drive is missing or needs firmware recovery")
+            if not drive.serial or confirmation != self._erase_phrase(profile, drive.serial):
+                raise ValueError("The erase phrase must match the exact drive serial")
+            await self.hardware.validate(drive, destructive=True)
+            plan = (await self.hardware.erase_plan(drive))[
+                "quick" if profile == "quick_erase" else "full"
+            ]
+            if not plan.get("available") or plan.get("method") != expected_method:
+                raise ValueError(
+                    "The erase method changed or is unavailable. Review a fresh confirmation."
+                )
+            if intent is not None:
+                original = intent["drive"]
+                if (
+                    intent["deadline"] <= time.monotonic()
+                    or original["identity"] != drive.identity
+                    or original["path"] != drive.path
+                    or intent["authority"] != self._telegram_authority(*intent["principal"])
+                ):
+                    raise ValueError("Erase confirmation expired or the drive changed")
+            wait_run = next(
+                (
+                    r
+                    for r in self.store.runs()
+                    if r["drive"]["identity"] == drive.identity
+                    and r.get("workflow_status") == "awaiting_action"
+                ),
+                None,
+            )
+            if wait_run:
+                wait = self.action_waits.get(wait_run["id"])
+                if (
+                    not wait
+                    or wait["deadline"] <= time.monotonic()
+                    or wait["event"].is_set()
+                    or self.stopping
+                ):
+                    raise ValueError("This choice has expired or was already used")
+                if intent is not None and intent["waiting_run"] != wait_run["id"]:
+                    raise ValueError("The drive's original action window changed")
+                wait.update(
+                    choice=profile,
+                    confirmation=confirmation,
+                    expected_method=expected_method,
+                    erase_intent=intent,
+                )
+                wait["event"].set()
+                return {"status": "accepted", "detail": "Confirmed erase requested."}
+            if intent is not None and intent["waiting_run"]:
+                raise ValueError("The drive's original action window ended")
+            run = await self._enqueue_locked(
+                drive_id,
+                profile,
+                confirmation,
+                expected_method=expected_method,
+                erase_intent=intent,
+            )
+            return {"status": "queued", "detail": "Confirmed erase queued.", "run": run}
+
     async def enqueue(
         self, drive_id: str, profile: str, confirmation: str = "", *, automatic: bool = False
     ) -> dict:
@@ -298,8 +486,8 @@ class Engine:
             raise ValueError("Choose quick, extended, or verify")
         if automatic and profile != "quick":
             raise ValueError("Automatic intake only permits the read-only quick profile")
-        if getattr(self.config, "headless", False) and profile == "verify":
-            raise ValueError("Headless mode only permits read-only tests")
+        if profile in ERASE_PROFILES:
+            raise ValueError("Use the erase confirmation endpoint")
         if not self.capabilities.get("can_test", True):
             limitations = "; ".join(self.capabilities.get("limitations") or [])
             suffix = f" {limitations}" if limitations else ""
@@ -317,7 +505,11 @@ class Engine:
         *,
         automatic: bool = False,
         replacing_run_id: str | None = None,
+        expected_method: str | None = None,
+        erase_intent: dict | None = None,
     ) -> dict:
+        if self.stopping:
+            raise ValueError("The station is stopping")
         drive = next((drive for drive in self.drives if drive.id == drive_id), None)
         if drive is None:
             raise ValueError("Drive is no longer connected. Rescan and try again.")
@@ -333,6 +525,23 @@ class Engine:
             for run in self.store.runs()
         ):
             raise ValueError("This drive already has a queued or running test")
+        if self._recovery_pending(drive):
+            raise SafetyError("This drive requires firmware erase recovery")
+        if profile in ERASE_PROFILES:
+            allowed = (
+                {"ata_secure_erase", "quick_format_exfat"}
+                if profile == "quick_erase"
+                else {"full_overwrite"}
+            )
+            if (
+                not self.config.allow_destructive
+                or expected_method not in allowed
+                or confirmation != self._erase_phrase(profile, drive.serial)
+                or not drive.serial
+            ):
+                raise ValueError(
+                    "Erase requires an enabled station and exact method/serial confirmation"
+                )
         if profile == "verify":
             if not self.config.allow_destructive:
                 raise ValueError("Write verification is disabled in station configuration")
@@ -340,7 +549,16 @@ class Engine:
                 raise ValueError(
                     "Confirm the exact drive serial using ERASE followed by its serial"
                 )
-        drive = await self.hardware.validate(drive, destructive=profile == "verify")
+        drive = await self.hardware.validate(
+            drive, destructive=profile == "verify" or profile in ERASE_PROFILES
+        )
+        if self.stopping:
+            raise ValueError("The station is stopping")
+        if erase_intent is not None and (
+            erase_intent["deadline"] <= time.monotonic()
+            or erase_intent["authority"] != self._telegram_authority(*erase_intent["principal"])
+        ):
+            raise ValueError("Telegram erase confirmation expired or authorization changed")
         run = {
             "id": uuid.uuid4().hex,
             "drive_id": drive.id,
@@ -365,8 +583,10 @@ class Engine:
                 "eject_detail": "",
             },
         }
+        if profile in ERASE_PROFILES:
+            run["erase_method"] = expected_method
         self.store.save(run)
-        if profile != "verify":
+        if profile != "verify" and profile not in ERASE_PROFILES:
             # A manual read-only test or retry is also an intake attempt.
             # Record it under the queue lock so discovery cannot race a retry.
             self.auto_attempted.add(drive.identity)
@@ -382,6 +602,10 @@ class Engine:
         self.publish()
 
     async def cancel(self, run_id: str):
+        if run_id == self.active_run_id and getattr(self.hardware, "firmware_erase_active", False):
+            raise ValueError(
+                "Firmware erase is active or needs recovery; do not cancel or power off the drive"
+            )
         run = self.store.get(run_id)
         if run is None:
             raise ValueError("Test not found")
@@ -433,6 +657,73 @@ class Engine:
         queued = await self.enqueue(current.id, "extended")
         return {"status": "queued", "detail": "Read-only extended retest queued.", "run": queued}
 
+    async def take_control(self, drive_id: str, confirmation: str) -> dict:
+        if self.stopping:
+            raise ValueError("The station is stopping")
+        if not self.capabilities.get("can_take_control"):
+            raise ValueError("Releasing inactive RAID claims requires Linux, root, and mdadm")
+        # Match discovery's lock order. Discovery must not enqueue an automatic
+        # job between releasing the kernel claim and queuing the chosen Quick test.
+        async with self.scan_lock:
+            async with self.enqueue_lock:
+                if (
+                    self.active_run_id is not None
+                    or self.release_in_progress
+                    or any(
+                        run["status"] in {"queued", "running"}
+                        or run.get("workflow_status") in BUSY_WORKFLOWS
+                        for run in self.store.runs()
+                    )
+                ):
+                    raise ValueError("Wait for all testing and release work to finish first")
+                drive = next((item for item in self.drives if item.id == drive_id), None)
+                if drive is None:
+                    raise ValueError("Drive is no longer connected. Rescan and try again.")
+                if self._recovery_pending(drive) or getattr(
+                    self.hardware, "firmware_erase_active", False
+                ):
+                    raise SafetyError(
+                        "Firmware erase recovery is required; taking control is blocked"
+                    )
+                if not drive.serial or confirmation != f"TAKE CONTROL {drive.serial}":
+                    raise ValueError(
+                        "Confirm the exact serial using TAKE CONTROL followed by its serial"
+                    )
+                self.release_in_progress = True
+                self.publish()
+                try:
+                    outcome = await self.hardware.take_control(drive, confirmation)
+                    if outcome.get("status") != "released":
+                        raise ValueError(
+                            outcome.get("detail", "The RAID claim could not be released")
+                        )
+                    self.drives = await self.hardware.discover()
+                    matches = [
+                        current for current in self.drives if current.identity == drive.identity
+                    ]
+                    if (
+                        len(matches) != 1
+                        or not matches[0].eligible
+                        or matches[0].path != drive.path
+                    ):
+                        raise SafetyError(
+                            "The released drive could not be confirmed safe for testing"
+                        )
+                    if self.stopping or asyncio.current_task().cancelling():
+                        raise asyncio.CancelledError
+                    run = await self._enqueue_locked(matches[0].id, "quick")
+                    # This explicit retry uses the same bounded intake lifecycle.
+                    # It is not subject to the connection's previous attempt marker.
+                    run.update(automatic=True, intake_source="take_control")
+                    self.record(
+                        run,
+                        "User released an inactive RAID claim; RAID metadata preserved. Quick read-only intake queued.",
+                    )
+                    return {**outcome, "run": run}
+                finally:
+                    self.release_in_progress = False
+                    self.publish()
+
     async def release(self, drive_id: str, action: str) -> dict:
         if action not in {"unmount", "eject"}:
             raise ValueError("Choose unmount or eject")
@@ -450,6 +741,10 @@ class Engine:
             drive = next((item for item in self.drives if item.id == drive_id), None)
             if drive is None:
                 raise ValueError("Drive is no longer connected. Rescan and try again.")
+            if self._recovery_pending(drive) or getattr(
+                self.hardware, "firmware_erase_active", False
+            ):
+                raise SafetyError("Firmware erase recovery is required; safe release is blocked")
             # Mounted inventory entries are intentionally ineligible for tests,
             # so their management adapter performs the fresh identity check while
             # allowing only the mount state needed for an explicit unmount.
@@ -492,6 +787,14 @@ class Engine:
                                 completed,
                                 "ready",
                                 notifications.run_message(completed, self.config.demo),
+                            )
+                        else:
+                            self.notice(
+                                completed,
+                                "release_failed",
+                                notifications.run_message(completed, self.config.demo)
+                                + "\nWhy eject failed: "
+                                + completed["lifecycle"]["eject_detail"],
                             )
             finally:
                 self.release_in_progress = False
@@ -540,13 +843,18 @@ class Engine:
         if self.settings.value["notifications"]["notify_started"]:
             self.notice(run, "started")
         steps = ["smart_before", "benchmark", "smart_after"]
-        if run["profile"] != "quick":
+        if run["profile"] in ERASE_PROFILES:
+            steps = ["erase"]
+        elif run["profile"] != "quick":
             steps = ["smart_before", "self_test", "benchmark", "surface", "smart_after"]
         cancelled = False
         try:
             for index, phase in enumerate(steps):
                 # Revalidate every phase, including queued jobs whose path may have changed.
-                drive = await self.hardware.validate(drive, destructive=run["profile"] == "verify")
+                drive = await self.hardware.validate(
+                    drive,
+                    destructive=run["profile"] == "verify" or run["profile"] in ERASE_PROFILES,
+                )
                 run.update(
                     phase=phase,
                     progress=round(index / len(steps) * 100, 1),
@@ -563,7 +871,17 @@ class Engine:
                     )
                     self.record(run)
 
-                if phase.startswith("smart"):
+                if phase == "erase":
+                    if not self.config.allow_destructive or self._recovery_pending(drive):
+                        raise SafetyError("Erase is disabled or firmware recovery is required")
+                    result = await self.hardware.erase(
+                        drive,
+                        run["profile"],
+                        progress,
+                        recovery_dir=self.config.data_dir / "erase-recovery",
+                        expected_method=run["erase_method"],
+                    )
+                elif phase.startswith("smart"):
                     result = await self.hardware.smart(drive)
                 elif phase == "self_test":
                     result = await self.hardware.self_test(drive, progress)
@@ -581,6 +899,8 @@ class Engine:
                 if result.get("status", result.get("health")) == "failed":
                     break  # No reason to keep stressing a drive already reporting a failure.
             status, detail = verdict(run["results"])
+            if run["profile"] in ERASE_PROFILES:
+                detail = run["results"].get("erase", {}).get("detail", detail)
             run.update(
                 status=status,
                 detail=detail,
@@ -589,6 +909,15 @@ class Engine:
         except asyncio.CancelledError:
             await self.hardware.cancel()
             run.update(status="cancelled", detail="Testing cancelled. Checks were not completed.")
+            if getattr(self.hardware, "firmware_erase_active", False) or self._recovery_pending(
+                drive
+            ):
+                run["results"]["erase"] = {
+                    "status": "incomplete",
+                    "recovery_required": True,
+                    "detail": "Firmware erase may still be running or the drive may be locked. Operator recovery required; do not power off.",
+                }
+                run.update(status="incomplete", detail=run["results"]["erase"]["detail"])
             cancelled = True
         except SafetyError as error:
             run.update(status="incomplete", detail=f"Safety check stopped testing: {error}")
@@ -599,7 +928,16 @@ class Engine:
             )
         finally:
             run["finished_at"] = now()
-            auto_release = bool(self.settings.value.get("auto_eject"))
+            recovery_required = bool(
+                run["results"].get("erase", {}).get("recovery_required")
+                or self._recovery_pending(drive)
+            )
+            auto_release = bool(self.settings.value.get("auto_eject")) and not recovery_required
+            if recovery_required:
+                run["lifecycle"].update(
+                    eject_status="not_requested",
+                    eject_detail="Firmware erase recovery is required; automatic eject is blocked.",
+                )
             run["workflow_status"] = "finishing" if auto_release and not cancelled else "complete"
             self.record(run, run["detail"])
             if auto_release and not cancelled:
@@ -679,6 +1017,26 @@ class Engine:
                 [
                     {"text": "Run Extended", "callback_data": f"dc:{run_id}:extended"},
                     {"text": "Eject now", "callback_data": f"dc:{run_id}:eject"},
+                ]
+            )
+        current = next(
+            (drive for drive in self.drives if run and drive.identity == run["drive"]["identity"]),
+            None,
+        )
+        if (
+            controls_authorized
+            and self.config.allow_destructive
+            and self.capabilities.get("can_erase")
+            and current
+            and current.eligible
+            and run
+            and run["status"] in TERMINAL
+            and (wait and wait["deadline"] > time.monotonic() and not wait["event"].is_set())
+        ):
+            rows.append(
+                [
+                    {"text": "Quick erase", "callback_data": f"dc:{run_id}:quick_erase"},
+                    {"text": "Full erase", "callback_data": f"dc:{run_id}:full_erase"},
                 ]
             )
         # Only the authorized private recipient receives a bearer sign-in grant.
@@ -790,16 +1148,21 @@ class Engine:
                     # Timeout and click compete for one lock, so only one can win.
                     if self.stopping or asyncio.current_task().cancelling():
                         raise asyncio.CancelledError
-                    if wait["choice"] == "extended":
+                    if wait["choice"] == "extended" or wait["choice"] in ERASE_PROFILES:
                         try:
                             current = await self.hardware.validate(drive)
                             followup = await self._enqueue_locked(
-                                current.id, "extended", replacing_run_id=run["id"]
+                                current.id,
+                                wait["choice"],
+                                wait.get("confirmation", ""),
+                                replacing_run_id=run["id"],
+                                expected_method=wait.get("expected_method"),
+                                erase_intent=wait.get("erase_intent"),
                             )
                         except Exception:
                             lifecycle["eject_status"] = "pending"
                             lifecycle["eject_detail"] = (
-                                "Extended could not start safely; attempting safe release."
+                                "The selected follow-up could not start safely; attempting safe release."
                             )
                         else:
                             # The continuation is now durably saved and queued while
@@ -807,14 +1170,14 @@ class Engine:
                             run["workflow_status"] = "complete"
                             lifecycle["eject_status"] = "not_requested"
                             lifecycle["eject_detail"] = (
-                                "Drive retained for the requested Extended test."
+                                "Drive retained for the requested follow-up job."
                             )
                             lifecycle["followup_run_id"] = followup["id"]
                             self.record(run, lifecycle["eject_detail"])
                             self.notice(
                                 run,
                                 "extended",
-                                "DriveCheck: Extended read-only test queued. The drive will eject after the test finishes.\nRun: "
+                                f"DriveCheck: {followup['profile'].replace('_', ' ')} queued. Safe release follows completion unless firmware recovery is required.\nRun: "
                                 + followup["id"],
                             )
                             return
@@ -850,6 +1213,14 @@ class Engine:
         if lifecycle["eject_status"] == "ejected":
             ready = notifications.run_message(run, self.config.demo)
             self.notice(run, "ready", ready)
+        else:
+            self.notice(
+                run,
+                "release_failed",
+                notifications.run_message(run, self.config.demo)
+                + "\nWhy eject failed: "
+                + lifecycle["eject_detail"],
+            )
 
     async def _wait_for_notice(self, run: dict, notice_id: str) -> None:
         deadline = time.monotonic() + max(

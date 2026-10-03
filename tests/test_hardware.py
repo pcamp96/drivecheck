@@ -17,6 +17,7 @@ from drivecheck.hardware import (
     SafetyError,
     get_hardware,
 )
+from drivecheck.raid import RaidInspector, RaidOwnership
 
 
 def result(args: tuple[str, ...], payload: object, returncode: int = 0) -> CommandResult:
@@ -110,6 +111,7 @@ def discovery(hardware: Hardware, *payloads: dict[str, object]) -> FakeRunner:
 def fake_block_device(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Hardware, "_pin_device", staticmethod(lambda _: 2049))
     monkeypatch.setattr(Hardware, "_exclusive_claim", staticmethod(lambda _: nullcontext()))
+    monkeypatch.setattr(RaidInspector, "inspect", lambda *_: RaidOwnership.clear())
 
 
 @pytest.mark.asyncio

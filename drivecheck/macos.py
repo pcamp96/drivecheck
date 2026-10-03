@@ -8,6 +8,7 @@ import re
 import shutil
 import stat
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 from drivecheck.hardware import CommandError, Drive, Hardware, Progress, SafetyError, _identity
@@ -59,9 +60,32 @@ class MacHardware(Hardware):
             "can_verify": False,
             "can_unmount": tools["diskutil"] and tools["ioreg"],
             "can_eject": tools["diskutil"] and tools["ioreg"],
+            "can_erase": False,
+            "can_take_control": False,
             "tools": tools,
             "limitations": limitations,
         }
+
+    async def erase_plan(self, drive: Drive) -> dict[str, Any]:
+        detail = "Drive erasure is disabled on macOS because exclusive destructive access cannot be proved."
+        return {
+            "quick": self._unavailable_erase("quick_format_exfat", False, detail),
+            "full": self._unavailable_erase("full_overwrite", True, detail),
+        }
+
+    async def erase(
+        self,
+        drive: Drive,
+        profile: str,
+        progress: Progress,
+        *,
+        recovery_dir: Path,
+        expected_method: str | None = None,
+    ) -> dict[str, Any]:
+        del drive, profile, progress, recovery_dir, expected_method
+        raise SafetyError(
+            "Drive erasure is disabled on macOS because exclusive destructive access cannot be proved."
+        )
 
     async def discover(self) -> list[Drive]:
         if self.demo:

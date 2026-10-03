@@ -8,6 +8,7 @@ PHASES = {
     "benchmark": "Read benchmark",
     "surface": "Full surface scan",
     "smart_after": "Final SMART health",
+    "erase": "Drive erasure",
 }
 
 
@@ -246,7 +247,23 @@ def _phase_lines(phase: str, result: dict[str, Any]) -> list[str]:
         speed = _value(result.get("read_mbps"))
         if speed is not None:
             lines.append(f"  Sequential read: {speed} MB/s.")
-    if phase == "surface":
+    if phase == "erase":
+        method = _text(result.get("method"))
+        description = {
+            "ata_secure_erase": "Drive firmware secure erase",
+            "quick_format_exfat": "Quick exFAT format",
+            "full_overwrite": "Complete overwrite with checksum readback",
+        }.get(method, method)
+        lines.append(f"  Method: {description}.")
+        if method == "quick_format_exfat":
+            lines.append(
+                "  Security: Quick format is not secure erasure; old file contents may remain recoverable."
+            )
+        if result.get("recovery_required"):
+            lines.append(
+                "  Recovery required: Do not power off this drive. Inspect the protected erase recovery record on the station."
+            )
+    if phase in {"surface", "erase"}:
         checked = _value(result.get("io_bytes", result.get("bytes_checked")))
         expected = _value(result.get("expected_bytes"))
         if checked is not None:
@@ -265,6 +282,8 @@ def human_report(run: dict[str, Any], demo: bool = False) -> str:
     if run.get("profile") in {"extended", "verify"}:
         expected = ["smart_before", "self_test", "benchmark", "surface", "smart_after"]
 
+    if run.get("profile") in {"quick_erase", "full_erase"}:
+        expected = ["erase"]
     lines = ["DriveCheck Report", "=" * 17, f"VERDICT: {status}"]
     if demo:
         lines.append("MODE: Simulation (no physical drive was tested)")

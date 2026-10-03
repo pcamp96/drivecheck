@@ -62,6 +62,16 @@ class SettingsInput(Input):
     notifications: NotificationInput | None = None
 
 
+class EraseInput(Input):
+    profile: Literal["quick_erase", "full_erase"]
+    confirmation: str = Field(max_length=300)
+    expected_method: Literal["ata_secure_erase", "quick_format_exfat", "full_overwrite"]
+
+
+class TakeControlInput(Input):
+    confirmation: str = Field(max_length=300)
+
+
 class ActionInput(Input):
     action: Literal["extended", "eject"]
 
@@ -254,6 +264,29 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
     async def scan():
         await engine().scan()
         return engine().state()
+
+    @app.get("/api/drives/{drive_id}/erase-plan", dependencies=[Depends(authenticated)])
+    async def erase_plan(drive_id: str):
+        try:
+            return await engine().erase_plan(drive_id)
+        except (ValueError, SafetyError) as error:
+            raise HTTPException(409, str(error)) from None
+
+    @app.post("/api/drives/{drive_id}/erase", dependencies=[Depends(authenticated)])
+    async def erase_drive(drive_id: str, body: EraseInput):
+        try:
+            return await engine().request_erase(
+                drive_id, body.profile, body.confirmation, body.expected_method
+            )
+        except (ValueError, SafetyError) as error:
+            raise HTTPException(409, str(error)) from None
+
+    @app.post("/api/drives/{drive_id}/take-control", dependencies=[Depends(authenticated)])
+    async def take_control(drive_id: str, body: TakeControlInput):
+        try:
+            return await engine().take_control(drive_id, body.confirmation)
+        except (ValueError, SafetyError) as error:
+            raise HTTPException(409, str(error)) from None
 
     @app.post("/api/drives/{drive_id}/{action}", dependencies=[Depends(authenticated)])
     async def release_drive(drive_id: str, action: Literal["unmount", "eject"]):

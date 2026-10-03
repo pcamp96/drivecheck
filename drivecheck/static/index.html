@@ -104,6 +104,7 @@
             <li data-phase="benchmark">Read benchmark</li>
             <li data-phase="surface">Surface scan</li>
             <li data-phase="smart_after">Final health</li>
+            <li data-phase="erase">Erase</li>
           </ol>
           <p class="active-detail" id="active-detail"></p>
           <div class="awaiting-action" id="awaiting-action" hidden>
@@ -206,6 +207,41 @@
       <div class="dialog-actions">
         <button type="button" class="quiet-button" id="verify-cancel">Keep data</button>
         <button type="submit" class="danger-button" id="verify-submit">Erase and verify</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="take-control-dialog" aria-labelledby="take-control-title">
+    <form method="dialog" id="take-control-form">
+      <button class="dialog-close" id="take-control-close" type="button" aria-label="Close take control dialog">×</button>
+      <p class="warning-mark ownership-mark" aria-hidden="true">R</p>
+      <h2 id="take-control-title">Release this inactive RAID claim?</h2>
+      <p id="take-control-drive"></p>
+      <p>This releases the inactive RAID claim so DriveCheck can start a read-only Quick test. It preserves the RAID metadata and files on the drive.</p>
+      <label for="take-control-confirmation">Type <code id="take-control-phrase"></code> to continue</label>
+      <input id="take-control-confirmation" type="text" autocomplete="off" spellcheck="false">
+      <p class="form-error" id="take-control-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" class="quiet-button" id="take-control-cancel">Cancel</button>
+        <button type="submit" id="take-control-submit">Take control and run Quick</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="erase-dialog" aria-labelledby="erase-title">
+    <form method="dialog" id="erase-form">
+      <button class="dialog-close" id="erase-close" type="button" aria-label="Close erase dialog">×</button>
+      <p class="warning-mark" aria-hidden="true">!</p>
+      <h2 id="erase-title">Erase this drive?</h2>
+      <p id="erase-drive"></p>
+      <div class="erase-method" id="erase-method" role="status">Checking the available erase method…</div>
+      <p class="configured-note" id="erase-deadline"></p>
+      <label for="erase-confirmation">Type <code id="erase-phrase"></code> to continue</label>
+      <input id="erase-confirmation" type="text" autocomplete="off" spellcheck="false">
+      <p class="form-error" id="erase-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" class="quiet-button" id="erase-cancel">Cancel</button>
+        <button type="submit" class="danger-button" id="erase-submit" disabled>Erase drive</button>
       </div>
     </form>
   </dialog>

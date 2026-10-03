@@ -14,6 +14,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import shutil
 import signal
 import stat
@@ -23,6 +24,9 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from drivecheck.erase import RecoveryJournal, parse_hdparm_security
+from drivecheck.raid import RaidInspector, RaidOwnership
 
 Progress = Callable[[int, str], Awaitable[None]]
 
@@ -51,6 +55,7 @@ class Drive:
     reasons: list[str]
     identity: str
     mounted: bool
+    ownership: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -79,6 +84,7 @@ class CommandRunner:
         timeout: float,
         stdout_chunk: Callable[[str], Awaitable[None]] | None = None,
         stderr_line: Callable[[str], Awaitable[None]] | None = None,
+        sensitive_args: set[int] | None = None,
     ) -> CommandResult:
         async with self._lock:
             if self._process is not None:
@@ -134,8 +140,12 @@ class CommandRunner:
                 elif not callback_failure.cancelled():
                     callback_failure.exception()
             (stdout, out_cut), (stderr, err_cut) = await asyncio.gather(stdout_task, stderr_task)
+            reported_args = tuple(
+                "[REDACTED]" if sensitive_args and index in sensitive_args else value
+                for index, value in enumerate(args)
+            )
             return CommandResult(
-                tuple(args), process.returncode or 0, stdout, stderr, out_cut or err_cut
+                reported_args, process.returncode or 0, stdout, stderr, out_cut or err_cut
             )
 
     async def cancel(self) -> None:
@@ -242,20 +252,46 @@ class Hardware:
         # Discovery must remain available while the operation runner is occupied
         # by a multi-hour fio or SMART command.
         self._discovery_runner = CommandRunner(output_limit=1_000_000)
+        self._probe_runner = CommandRunner(output_limit=1_000_000)
         self._cancel_requested = False
         self._self_test_drive: Drive | None = None
         self.self_test_poll_seconds = 30.0
         self.self_test_timeout_seconds = 48 * 60 * 60.0
         self.io_safety_poll_seconds = 3.0
         self.demo_step_seconds = 0.0
+        self.firmware_erase_active = False
         self._logical_sector_bytes: dict[str, int] = {}
+        self._raid_inspector = RaidInspector()
 
     def capabilities(self) -> dict[str, Any]:
         tools = {
-            name: bool(shutil.which(name)) for name in ("lsblk", "smartctl", "fio", "udisksctl")
+            name: bool(shutil.which(name))
+            for name in (
+                "lsblk",
+                "smartctl",
+                "fio",
+                "udisksctl",
+                "mdadm",
+                "hdparm",
+                "wipefs",
+                "sgdisk",
+                "mkfs.exfat",
+                "partprobe",
+                "blkid",
+            )
         }
         root = hasattr(os, "geteuid") and os.geteuid() == 0
         can_test = root and tools["lsblk"] and tools["fio"]
+        can_take_control = not self.demo and root and tools["lsblk"] and tools["mdadm"]
+        format_tools = all(
+            tools[name] for name in ("wipefs", "sgdisk", "mkfs.exfat", "partprobe", "blkid")
+        )
+        can_erase = (
+            not self.demo
+            and root
+            and tools["lsblk"]
+            and (tools["fio"] or tools["hdparm"] or format_tools)
+        )
         limitations: list[str] = []
         if not root:
             limitations.append("Raw drive tests require root privileges.")
@@ -265,12 +301,16 @@ class Hardware:
             limitations.append("smartctl is unavailable; health coverage will be incomplete.")
         if not tools["udisksctl"]:
             limitations.append("udisksctl is unavailable; USB power-off is disabled.")
+        if not tools["mdadm"]:
+            limitations.append("mdadm is unavailable; inactive MD claims cannot be released.")
         return {
             "platform": "linux",
             "can_test": can_test,
             "can_verify": can_test,
             "can_unmount": False,
             "can_eject": tools["udisksctl"],
+            "can_take_control": can_take_control,
+            "can_erase": can_erase,
             "tools": tools,
             "limitations": limitations,
         }
@@ -299,7 +339,7 @@ class Hardware:
             raise CommandError("lsblk JSON has no block device list")
 
         swaps = await self._swap_paths()
-        records: list[tuple[dict[str, Any], Drive]] = []
+        records: list[tuple[dict[str, Any], Drive, RaidOwnership]] = []
         logical_sectors: dict[str, int] = {}
         for node in nodes:
             if _text(node.get("type")) != "disk":
@@ -314,6 +354,8 @@ class Hardware:
                 size = 0
             mounts = _mountpoints(node)
             child_paths = self._node_paths(node)
+            partition_paths = self._partition_paths(node)
+            stacked_paths = self._stacked_paths(node)
             has_swap = bool(swaps.intersection(child_paths)) or "[SWAP]" in mounts
             mounted = bool(mounts) or has_swap
             reasons: list[str] = []
@@ -335,6 +377,9 @@ class Hardware:
                 logical_sector = 0
             if logical_sector <= 0 or size % logical_sector:
                 reasons.append("invalid_logical_sector")
+            ownership = self._raid_inspector.inspect(path, partition_paths, stacked_paths)
+            if ownership.blocked:
+                reasons.append("device_in_use")
             ident = _identity(model, serial, size)
             if logical_sector > 0:
                 logical_sectors[ident] = logical_sector
@@ -353,21 +398,41 @@ class Hardware:
                         identity=ident,
                         mounted=mounted,
                     ),
+                    ownership,
                 )
             )
         identity_counts: dict[str, int] = {}
         serial_counts: dict[str, int] = {}
-        for _, drive in records:
+        for _, drive, _ in records:
             identity_counts[drive.identity] = identity_counts.get(drive.identity, 0) + 1
             if drive.serial:
                 serial_counts[drive.serial] = serial_counts.get(drive.serial, 0) + 1
         drives: list[Drive] = []
-        for _, drive in records:
+        root = hasattr(os, "geteuid") and os.geteuid() == 0
+        mdadm = bool(shutil.which("mdadm"))
+        for _, drive, ownership in records:
             if identity_counts[drive.identity] > 1 or (
                 drive.serial and serial_counts[drive.serial] > 1
             ):
                 drive.reasons.append("duplicate_identity")
                 drive.eligible = False
+            if ownership.blocked:
+                other_reasons = [reason for reason in drive.reasons if reason != "device_in_use"]
+                available = ownership.releasable and not other_reasons and root and mdadm
+                detail = ownership.detail
+                if ownership.releasable and other_reasons:
+                    detail = (
+                        "Take control is unavailable until other drive safety issues are resolved."
+                    )
+                elif ownership.releasable and not root:
+                    detail = "Root privileges are required to release the inactive MD claim."
+                elif ownership.releasable and not mdadm:
+                    detail = "mdadm is required to release the inactive MD claim."
+                drive.ownership = {
+                    "take_control_available": available,
+                    "detail": detail,
+                    "arrays": ownership.arrays,
+                }
             drives.append(drive)
         self._logical_sector_bytes = logical_sectors
         return drives
@@ -388,6 +453,24 @@ class Hardware:
             paths.update(cls._node_paths(child))
         return paths
 
+    @classmethod
+    def _partition_paths(cls, node: dict[str, Any]) -> set[str]:
+        paths: set[str] = set()
+        for child in node.get("children") or []:
+            if _text(child.get("type")) == "part":
+                paths.add(_text(child.get("path")) or f"/dev/{_text(child.get('name'))}")
+            paths.update(cls._partition_paths(child))
+        return paths
+
+    @classmethod
+    def _stacked_paths(cls, node: dict[str, Any]) -> set[str]:
+        paths: set[str] = set()
+        for child in node.get("children") or []:
+            if _text(child.get("type")) not in {"", "part"}:
+                paths.add(_text(child.get("path")) or f"/dev/{_text(child.get('name'))}")
+            paths.update(cls._stacked_paths(child))
+        return paths
+
     async def validate(self, drive: Drive, destructive: bool = False) -> Drive:
         matches = [
             current for current in await self.discover() if current.identity == drive.identity
@@ -404,6 +487,70 @@ class Hardware:
         if destructive and (not current.serial or current.mounted):
             raise SafetyError("destructive verification requires a unique unmounted serial")
         return current
+
+    async def take_control(self, drive: Drive, confirmation: str) -> dict[str, str]:
+        if self.demo:
+            raise SafetyError("demo drives have no ownership claims")
+        if confirmation != f"TAKE CONTROL {drive.serial}" or not drive.serial:
+            raise SafetyError("exact drive serial confirmation is required")
+        if not hasattr(os, "geteuid") or os.geteuid() != 0:
+            raise SafetyError("root privileges are required")
+        if not shutil.which("mdadm"):
+            raise SafetyError("mdadm is unavailable")
+        try:
+            current = await self._takeover_candidate(drive)
+            arrays = [item["path"] for item in current.ownership["arrays"]]
+            for index, array_path in enumerate(arrays):
+                current = await self._takeover_candidate(drive)
+                current_arrays = {item["path"] for item in current.ownership["arrays"]}
+                if current_arrays != set(arrays[index:]):
+                    raise SafetyError("inactive MD ownership changed before release")
+                result = await self._runner.run("mdadm", "--stop", array_path, timeout=60)
+                if result.returncode:
+                    raise SafetyError(f"mdadm could not stop {array_path} safely")
+            matches = await self._takeover_matches(drive)
+            if len(matches) != 1:
+                raise SafetyError("drive identity is missing or no longer unique after release")
+            released = matches[0]
+            if (
+                released.path != drive.path
+                or released.serial != drive.serial
+                or released.size_bytes != drive.size_bytes
+                or not released.eligible
+                or released.ownership is not None
+            ):
+                raise SafetyError("drive did not become safely eligible after release")
+        except CommandError as exc:
+            raise SafetyError("drive ownership could not be revalidated safely") from exc
+        return {
+            "status": "released",
+            "detail": "Inactive RAID claim released; metadata preserved.",
+        }
+
+    async def _takeover_candidate(self, drive: Drive) -> Drive:
+        matches = await self._takeover_matches(drive)
+        if len(matches) != 1:
+            raise SafetyError("drive identity is missing or no longer unique")
+        current = matches[0]
+        if current.path != drive.path:
+            raise SafetyError("drive path changed")
+        if current.serial != drive.serial or current.size_bytes != drive.size_bytes:
+            raise SafetyError("drive identity changed")
+        if set(current.reasons) != {"device_in_use"}:
+            raise SafetyError("drive has safety issues beyond an inactive MD ownership claim")
+        ownership = current.ownership or {}
+        if not ownership.get("take_control_available") or not ownership.get("arrays"):
+            raise SafetyError(
+                _text(ownership.get("detail")) or "ownership cannot be released safely"
+            )
+        return current
+
+    async def _takeover_matches(self, drive: Drive) -> list[Drive]:
+        try:
+            discovered = await self.discover()
+        except CommandError as exc:
+            raise SafetyError("drive ownership could not be revalidated safely") from exc
+        return [candidate for candidate in discovered if candidate.identity == drive.identity]
 
     async def unmount(self, drive: Drive) -> dict[str, str]:
         if self.demo:
@@ -775,6 +922,477 @@ class Hardware:
             timeout=60 * 60 * 72,
             expected_bytes=current.size_bytes,
         )
+
+    async def erase_plan(self, drive: Drive) -> dict[str, Any]:
+        """Return the currently safe erase methods without mutating the drive."""
+        if self.demo:
+            return {
+                "quick": {
+                    "available": True,
+                    "method": "quick_format_exfat",
+                    "secure": False,
+                    "detail": "Demo quick erase creates a simulated empty exFAT volume.",
+                    "estimated_minutes": 1,
+                },
+                "full": {
+                    "available": True,
+                    "method": "full_overwrite",
+                    "secure": True,
+                    "detail": "Demo full erase simulates a complete overwrite and readback.",
+                },
+            }
+        if self.firmware_erase_active:
+            detail = "ATA firmware erase recovery is required before another drive action."
+            return {
+                "quick": self._unavailable_erase("ata_secure_erase", True, detail),
+                "full": self._unavailable_erase("full_overwrite", True, detail),
+            }
+        try:
+            current = await self.validate(drive, destructive=True)
+        except (SafetyError, CommandError) as exc:
+            detail = f"Drive is not safely erasable: {exc}"
+            return {
+                "quick": self._unavailable_erase("quick_format_exfat", False, detail),
+                "full": self._unavailable_erase("full_overwrite", True, detail),
+            }
+        if not hasattr(os, "geteuid") or os.geteuid() != 0:
+            detail = "Root privileges are required to erase a drive."
+            return {
+                "quick": self._unavailable_erase("quick_format_exfat", False, detail),
+                "full": self._unavailable_erase("full_overwrite", True, detail),
+            }
+
+        full_available = bool(shutil.which("fio"))
+        full = {
+            "available": full_available,
+            "method": "full_overwrite",
+            "secure": True,
+            "detail": (
+                "Writes and reads back the entire drive with SHA-256 verification."
+                if full_available
+                else "fio is required for a full overwrite."
+            ),
+        }
+        quick = await self._quick_erase_plan(current)
+        return {"quick": quick, "full": full}
+
+    async def erase(
+        self,
+        drive: Drive,
+        profile: str,
+        progress: Progress,
+        *,
+        recovery_dir: Path,
+        expected_method: str | None = None,
+    ) -> dict[str, Any]:
+        if profile not in {"quick_erase", "full_erase"}:
+            raise ValueError("unknown erase profile")
+        plan = await self.erase_plan(drive)
+        choice = plan["quick" if profile == "quick_erase" else "full"]
+        if not choice["available"]:
+            raise SafetyError(choice["detail"])
+        method = choice["method"]
+        if expected_method is not None and expected_method != method:
+            raise SafetyError("erase method changed; review and confirm the new plan")
+        if self.demo:
+            for percent in (0, 35, 72, 100):
+                await progress(percent, choice["detail"])
+                await asyncio.sleep(self.demo_step_seconds)
+            return {"status": "passed", "method": method, "detail": choice["detail"]}
+        if profile == "full_erase":
+            result = await self.surface(drive, progress, destructive=True)
+            return {**result, "method": "full_overwrite"}
+        if method == "ata_secure_erase":
+            return await self._ata_secure_erase(
+                drive,
+                progress,
+                recovery_dir=recovery_dir,
+                estimated_minutes=choice.get("estimated_minutes"),
+            )
+        return await self._quick_format_exfat(drive, progress)
+
+    async def _quick_erase_plan(self, drive: Drive) -> dict[str, Any]:
+        if shutil.which("hdparm"):
+            try:
+                security = await self._ata_security(drive)
+            except (CommandError, SafetyError):
+                return self._unavailable_erase(
+                    "ata_secure_erase",
+                    True,
+                    "ATA security state could not be verified safely.",
+                )
+            if security.supported is True:
+                if security.ready:
+                    return {
+                        "available": True,
+                        "method": "ata_secure_erase",
+                        "secure": True,
+                        "detail": "Drive firmware reports ATA Secure Erase ready.",
+                        "estimated_minutes": security.erase_minutes,
+                    }
+                states = []
+                for name in ("enabled", "locked", "frozen"):
+                    value = getattr(security, name)
+                    if value is not False:
+                        states.append(name if value is True else f"unknown {name}")
+                return self._unavailable_erase(
+                    "ata_secure_erase",
+                    True,
+                    "ATA Secure Erase is not safe while security state is "
+                    + ", ".join(states)
+                    + ".",
+                )
+            if security.supported is None:
+                return self._unavailable_erase(
+                    "ata_secure_erase",
+                    True,
+                    "ATA Secure Erase support could not be determined.",
+                )
+        return self._quick_format_plan()
+
+    @staticmethod
+    def _unavailable_erase(method: str, secure: bool, detail: str) -> dict[str, Any]:
+        return {
+            "available": False,
+            "method": method,
+            "secure": secure,
+            "detail": detail,
+            "estimated_minutes": None,
+        }
+
+    @staticmethod
+    def _quick_format_plan() -> dict[str, Any]:
+        required = ("wipefs", "sgdisk", "mkfs.exfat", "partprobe", "blkid", "lsblk")
+        missing = [name for name in required if not shutil.which(name)]
+        if missing:
+            return Hardware._unavailable_erase(
+                "quick_format_exfat",
+                False,
+                "Quick format requires: " + ", ".join(missing) + ".",
+            )
+        return {
+            "available": True,
+            "method": "quick_format_exfat",
+            "secure": False,
+            "detail": "Removes old signatures and creates one empty exFAT volume; old data is not securely overwritten.",
+            "estimated_minutes": 2,
+        }
+
+    async def _ata_security(self, drive: Drive):
+        current = await self.validate(drive, destructive=True)
+        result = await self._probe_runner.run("hdparm", "-I", current.path, timeout=45)
+        if result.returncode:
+            raise CommandError("hdparm could not identify ATA security state")
+        return parse_hdparm_security(result.stdout)
+
+    async def _ata_secure_erase(
+        self,
+        drive: Drive,
+        progress: Progress,
+        *,
+        recovery_dir: Path,
+        estimated_minutes: int | None,
+    ) -> dict[str, Any]:
+        current = await self.validate(drive, destructive=True)
+        password = secrets.token_hex(12)
+        journal = RecoveryJournal(recovery_dir, current.identity)
+        payload = {
+            "version": 1,
+            "identity": current.identity,
+            "serial": current.serial,
+            "path": current.path,
+            "password": password,
+            "stage": "password_prepared",
+        }
+        try:
+            journal.create(payload)
+        except (OSError, RuntimeError) as exc:
+            raise SafetyError(
+                "a protected ATA erase recovery journal could not be created"
+            ) from exc
+
+        armed = False
+        try:
+            with self._exclusive_claim(current.path):
+                current = await self.validate(current, destructive=True)
+                device_number = self._pin_device(current.path)
+                security = await self._ata_security(current)
+                if not security.ready:
+                    raise SafetyError("ATA security state changed before erase")
+                await progress(1, "Preparing ATA Secure Erase")
+                self.firmware_erase_active = True
+                armed = True
+                set_password = await self._runner.run(
+                    "hdparm",
+                    "--user-master",
+                    "u",
+                    "--security-set-pass",
+                    password,
+                    current.path,
+                    timeout=60,
+                    sensitive_args={4},
+                )
+                if set_password.returncode:
+                    return self._ata_recovery_result()
+                payload["stage"] = "password_set"
+                journal.update(payload)
+                await progress(2, "ATA Secure Erase started")
+                timeout = min(48 * 60 * 60, max(60 * 60, ((estimated_minutes or 720) + 30) * 60))
+                erase = await self._run_ata_erase_command(
+                    current, password, device_number, progress, timeout
+                )
+                if erase.returncode or self._cancel_requested:
+                    return self._ata_recovery_result()
+                security = await self._ata_security(current)
+                if security.enabled is not False or security.locked is not False:
+                    return self._ata_recovery_result()
+        except asyncio.CancelledError:
+            if armed:
+                raise
+            try:
+                journal.remove()
+            except OSError as exc:
+                raise SafetyError(
+                    "ATA recovery journal cleanup requires operator attention"
+                ) from exc
+            raise
+        except (CommandError, SafetyError, OSError, RuntimeError):
+            if armed:
+                return self._ata_recovery_result()
+            try:
+                journal.remove()
+            except OSError as exc:
+                raise SafetyError(
+                    "ATA recovery journal cleanup requires operator attention"
+                ) from exc
+            raise
+        try:
+            journal.remove()
+        except OSError:
+            return self._ata_recovery_result()
+        self.firmware_erase_active = False
+        await progress(100, "ATA Secure Erase completed")
+        return {
+            "status": "passed",
+            "method": "ata_secure_erase",
+            "detail": "Drive firmware completed ATA Secure Erase and disabled its security password.",
+        }
+
+    async def _run_ata_erase_command(
+        self,
+        drive: Drive,
+        password: str,
+        device_number: int,
+        progress: Progress,
+        timeout: float,
+    ) -> CommandResult:
+        self._cancel_requested = False
+        task = asyncio.create_task(
+            self._runner.run(
+                "hdparm",
+                "--user-master",
+                "u",
+                "--security-erase",
+                password,
+                drive.path,
+                timeout=timeout,
+                sensitive_args={4},
+            )
+        )
+        safety_error: SafetyError | CommandError | None = None
+        try:
+            while not task.done():
+                done, _ = await asyncio.wait({task}, timeout=self.io_safety_poll_seconds)
+                if done:
+                    break
+                try:
+                    current = await self.validate(drive, destructive=True)
+                    if self._pin_device(current.path) != device_number:
+                        raise SafetyError("block device number changed")
+                    if self._cancel_requested:
+                        raise SafetyError("ATA erase cancellation was requested")
+                    await progress(2, "ATA Secure Erase is running in drive firmware")
+                except (SafetyError, CommandError) as exc:
+                    safety_error = exc
+                    await self._runner.cancel()
+                    break
+            result = await task
+        except asyncio.CancelledError:
+            await self._runner.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        if safety_error is not None:
+            raise safety_error
+        return result
+
+    @staticmethod
+    def _ata_recovery_result() -> dict[str, Any]:
+        return {
+            "status": "incomplete",
+            "method": "ata_secure_erase",
+            "detail": "ATA erase state is uncertain; use the protected recovery journal before any further action.",
+            "recovery_required": True,
+        }
+
+    async def _quick_format_exfat(self, drive: Drive, progress: Progress) -> dict[str, Any]:
+        current = await self.validate(drive, destructive=True)
+        device_number = self._pin_device(current.path)
+        try:
+            old_partitions = await self._erase_partitions(current.path)
+            with self._exclusive_claim(current.path):
+                total_steps = len(old_partitions) + 6
+                step = 0
+                for path in (*old_partitions, current.path):
+                    await self._erase_revalidate(current, device_number)
+                    result = await self._runner.run("wipefs", "--all", "--force", path, timeout=120)
+                    if result.returncode:
+                        raise CommandError("wipefs could not remove old signatures")
+                    step += 1
+                    await progress(int(step / total_steps * 100), "Removing old signatures")
+                commands = (
+                    ("sgdisk", "--zap-all", current.path),
+                    (
+                        "sgdisk",
+                        "--clear",
+                        "--new=1:0:0",
+                        "--typecode=1:0700",
+                        "--change-name=1:DRIVECHECK",
+                        current.path,
+                    ),
+                    ("partprobe", current.path),
+                )
+                for command in commands:
+                    await self._erase_revalidate(current, device_number)
+                    result = await self._runner.run(*command, timeout=120)
+                    if result.returncode:
+                        raise CommandError(f"{command[0]} could not prepare the new volume")
+                    step += 1
+                    await progress(int(step / total_steps * 100), "Creating a new GPT volume")
+                partition = await self._wait_for_single_partition(current.path)
+                await self._erase_revalidate(current, device_number)
+                if await self._erase_partitions(current.path) != (partition,):
+                    raise SafetyError("the new partition topology could not be verified")
+
+            # exfatprogs opens the partition O_EXCL itself. Holding an O_EXCL
+            # claim on the parent disk here makes that safe formatter open fail
+            # with EBUSY, so hand the claim directly to mkfs after one final
+            # identity/topology check. If an automounter wins the tiny handoff
+            # window, mkfs's exclusive open fails instead of formatting it.
+            formatted = await self._run_exfat_format(current, partition, device_number, progress)
+            if formatted.returncode:
+                raise CommandError("mkfs.exfat could not create the volume")
+            step += 1
+            await progress(int(step / total_steps * 100), "Creating the exFAT filesystem")
+
+            await self._erase_revalidate(current, device_number)
+            with self._exclusive_claim(current.path):
+                await self._erase_revalidate(current, device_number)
+                if await self._erase_partitions(current.path) != (partition,):
+                    raise SafetyError("the new partition topology could not be verified")
+                verified = await self._runner.run("blkid", "-o", "export", partition, timeout=30)
+                fields = dict(
+                    line.split("=", 1) for line in verified.stdout.splitlines() if "=" in line
+                )
+                if verified.returncode or fields.get("TYPE") != "exfat":
+                    raise CommandError("the new exFAT filesystem could not be verified")
+                await self._erase_revalidate(current, device_number)
+                if await self._erase_partitions(current.path) != (partition,):
+                    raise SafetyError("the new partition topology could not be verified")
+        except (CommandError, SafetyError) as exc:
+            return {
+                "status": "failed",
+                "method": "quick_format_exfat",
+                "detail": str(exc),
+            }
+        await progress(100, "Quick exFAT format completed")
+        return {
+            "status": "passed",
+            "method": "quick_format_exfat",
+            "detail": "Old signatures were removed and one quick-formatted exFAT volume was verified; old data was not securely overwritten.",
+        }
+
+    async def _run_exfat_format(
+        self,
+        drive: Drive,
+        partition: str,
+        device_number: int,
+        progress: Progress,
+    ) -> CommandResult:
+        await self._erase_revalidate(drive, device_number)
+        if await self._erase_partitions(drive.path) != (partition,):
+            raise SafetyError("the new partition topology changed before formatting")
+        self._cancel_requested = False
+        task = asyncio.create_task(
+            self._runner.run("mkfs.exfat", "-K", "-L", "DRIVECHECK", partition, timeout=60 * 60)
+        )
+        safety_error: SafetyError | CommandError | None = None
+        try:
+            while not task.done():
+                done, _ = await asyncio.wait({task}, timeout=self.io_safety_poll_seconds)
+                if done:
+                    break
+                try:
+                    await self._erase_revalidate(drive, device_number)
+                    if await self._erase_partitions(drive.path) != (partition,):
+                        raise SafetyError("partition topology changed during formatting")
+                    if self._cancel_requested:
+                        raise SafetyError("quick format cancellation was requested")
+                    await progress(90, "Creating the exFAT filesystem")
+                except (SafetyError, CommandError) as exc:
+                    safety_error = exc
+                    await self._runner.cancel()
+                    break
+            result = await task
+        except asyncio.CancelledError:
+            await self._runner.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        if safety_error is not None:
+            raise safety_error
+        await self._erase_revalidate(drive, device_number)
+        if await self._erase_partitions(drive.path) != (partition,):
+            raise SafetyError("partition topology changed after formatting")
+        return result
+
+    async def _erase_revalidate(self, drive: Drive, device_number: int) -> Drive:
+        current = await self.validate(drive, destructive=True)
+        if self._pin_device(current.path) != device_number:
+            raise SafetyError("block device number changed")
+        return current
+
+    async def _erase_partitions(self, disk_path: str) -> tuple[str, ...]:
+        result = await self._discovery_runner.run(
+            "lsblk", "--json", "--paths", "--output", "PATH,TYPE,PKNAME", disk_path, timeout=15
+        )
+        if result.returncode:
+            raise CommandError("partition topology could not be read")
+        try:
+            nodes = json.loads(result.stdout).get("blockdevices", [])
+        except (AttributeError, json.JSONDecodeError) as exc:
+            raise CommandError("partition topology was invalid") from exc
+        if len(nodes) != 1 or _text(nodes[0].get("path")) != disk_path:
+            raise SafetyError("partition topology did not uniquely match the selected drive")
+        disk_name = Path(disk_path).name
+        partitions: list[str] = []
+        for child in nodes[0].get("children") or []:
+            if (
+                _text(child.get("type")) != "part"
+                or Path(_text(child.get("pkname"))).name != disk_name
+            ):
+                raise SafetyError("unexpected stacked block device appeared during erase")
+            path = _text(child.get("path"))
+            if not re.fullmatch(r"/dev/[A-Za-z0-9._+-]+", path) or child.get("children"):
+                raise SafetyError("partition topology is unsafe")
+            partitions.append(path)
+        return tuple(sorted(partitions))
+
+    async def _wait_for_single_partition(self, disk_path: str) -> str:
+        for _ in range(20):
+            partitions = await self._erase_partitions(disk_path)
+            if len(partitions) == 1:
+                return partitions[0]
+            await asyncio.sleep(0.1)
+        raise SafetyError("new partition did not appear uniquely")
 
     async def _fio(
         self,

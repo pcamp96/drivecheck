@@ -156,6 +156,317 @@ def main():
                 assert reused_page.url == base + "/"
                 reused_context.close()
 
+                # RAID ownership is rendered and confirmed entirely from synthetic state.
+                ownership_state = json.loads(json.dumps(state))
+                base_drive = ownership_state["drives"][0]
+                raid_drive = {
+                    **base_drive,
+                    "id": "fixture-inactive-raid",
+                    "serial": "FIXTURE-RAID-1",
+                    "eligible": False,
+                    "reasons": ["device_in_use"],
+                    "ownership": {
+                        "take_control_available": True,
+                        "detail": "Claimed by an inactive Linux RAID array.",
+                        "arrays": [
+                            {
+                                "path": "/dev/md127",
+                                "state": "inactive",
+                                "members": ["/dev/sdz1", "/dev/sdy1"],
+                            }
+                        ],
+                    },
+                }
+                mounted_drive = {
+                    **base_drive,
+                    "id": "fixture-mounted-raid",
+                    "serial": "FIXTURE-MOUNTED",
+                    "eligible": False,
+                    "mounted": True,
+                    "reasons": ["mounted", "device_in_use"],
+                    "ownership": {
+                        "take_control_available": False,
+                        "detail": "Mounted RAID member remains in use.",
+                        "arrays": [],
+                    },
+                }
+                active_drive = {
+                    **base_drive,
+                    "id": "fixture-active-raid",
+                    "serial": "FIXTURE-ACTIVE",
+                    "eligible": False,
+                    "reasons": ["device_in_use"],
+                    "ownership": {
+                        "take_control_available": False,
+                        "detail": "Active RAID arrays cannot be released.",
+                        "arrays": [
+                            {"path": "/dev/md0", "state": "active", "members": ["/dev/sdx1"]}
+                        ],
+                    },
+                }
+                ownership_state["drives"] = [raid_drive, mounted_drive, active_drive]
+                ownership_state["runs"] = []
+                ownership_state["system"]["active_run_id"] = None
+                take_calls = []
+
+                mock_context = browser.new_context(viewport={"width": 1200, "height": 900})
+                mock_page = mock_context.new_page()
+                mock_page.goto(base)
+                mock_page.locator("#token").fill(TOKEN)
+                mock_page.get_by_role("button", name="Sign in", exact=True).click()
+                expect(mock_page.locator("#app-view")).to_be_visible()
+                mock_page.route(
+                    "**/api/state",
+                    lambda route: route.fulfill(status=200, json=ownership_state),
+                )
+                mock_page.route("**/api/events", lambda route: route.abort())
+
+                def take_control(route):
+                    take_calls.append(route.request.post_data_json)
+                    if len(take_calls) == 1:
+                        route.fulfill(status=409, json={"detail": "The RAID array became active."})
+                    else:
+                        route.fulfill(
+                            status=200,
+                            json={
+                                "status": "released",
+                                "detail": "Inactive RAID claim released; Quick test queued.",
+                                "run": {"id": "fixture-quick", "profile": "quick"},
+                            },
+                        )
+
+                mock_page.route("**/api/drives/fixture-inactive-raid/take-control", take_control)
+                mock_page.reload()
+                expect(mock_page.locator("#drive-list")).to_contain_text(
+                    "Claimed by an inactive Linux RAID array."
+                )
+                expect(mock_page.locator("#drive-list")).to_contain_text(
+                    "/dev/md127 · inactive · Members: /dev/sdz1, /dev/sdy1"
+                )
+                expect(mock_page.get_by_role("button", name="Take control")).to_have_count(1)
+                expect(
+                    mock_page.get_by_role("button", name="Quick erase", exact=True)
+                ).to_have_count(0)
+                expect(
+                    mock_page.get_by_role("button", name="Full erase", exact=True)
+                ).to_have_count(0)
+                expect(
+                    mock_page.locator(".drive-card", has_text="FIXTURE-MOUNTED").get_by_role(
+                        "button", name="Take control"
+                    )
+                ).to_have_count(0)
+                expect(
+                    mock_page.locator(".drive-card", has_text="FIXTURE-ACTIVE").get_by_role(
+                        "button", name="Take control"
+                    )
+                ).to_have_count(0)
+                mock_page.get_by_role("button", name="Take control").click()
+                expect(mock_page.locator("#take-control-dialog")).to_contain_text("FIXTURE-RAID-1")
+                expect(mock_page.locator("#take-control-dialog")).to_contain_text(
+                    "preserves the RAID metadata and files"
+                )
+                mock_page.locator("#take-control-confirmation").fill("TAKE CONTROL wrong")
+                mock_page.locator("#take-control-submit").click()
+                expect(mock_page.locator("#take-control-error")).to_contain_text("exactly")
+                assert take_calls == []
+                mock_page.locator("#take-control-confirmation").fill("TAKE CONTROL FIXTURE-RAID-1")
+                mock_page.locator("#take-control-submit").click()
+                expect(mock_page.locator("#take-control-error")).to_contain_text("became active")
+                expect(mock_page.locator("#take-control-submit")).to_be_enabled()
+                mock_page.locator("#take-control-confirmation").fill("TAKE CONTROL FIXTURE-RAID-1")
+                expect(mock_page.locator("#take-control-error")).to_have_text("")
+                mock_page.locator("#take-control-submit").click()
+                expect(mock_page.locator("#take-control-dialog")).to_be_hidden()
+                expect(mock_page.locator(".toast")).to_contain_text("Quick test queued")
+                assert take_calls == [
+                    {"confirmation": "TAKE CONTROL FIXTURE-RAID-1"},
+                    {"confirmation": "TAKE CONTROL FIXTURE-RAID-1"},
+                ]
+                mock_context.close()
+
+                erase_state = json.loads(json.dumps(state))
+                erase_drive = {
+                    **erase_state["drives"][0],
+                    "id": "fixture-erase-drive",
+                    "serial": "FIXTURE-ERASE-1",
+                    "eligible": True,
+                    "mounted": False,
+                    "reasons": [],
+                }
+                erase_state["drives"] = [erase_drive]
+                erase_state["runs"] = []
+                erase_state["settings"]["allow_destructive"] = False
+                erase_state["system"]["active_run_id"] = None
+                erase_plan_calls = []
+                erase_posts = []
+                erase_attempts = {"quick_erase": 0, "full_erase": 0}
+
+                erase_context = browser.new_context(viewport={"width": 1200, "height": 900})
+                erase_page = erase_context.new_page()
+                erase_page.goto(base)
+                erase_page.locator("#token").fill(TOKEN)
+                erase_page.get_by_role("button", name="Sign in", exact=True).click()
+                expect(erase_page.locator("#app-view")).to_be_visible()
+                erase_page.route(
+                    "**/api/state", lambda route: route.fulfill(status=200, json=erase_state)
+                )
+                erase_page.route("**/api/events", lambda route: route.abort())
+
+                def erase_plan(route):
+                    erase_plan_calls.append(True)
+                    quick = (
+                        {
+                            "available": True,
+                            "method": "ata_secure_erase",
+                            "secure": True,
+                            "detail": "Drive firmware supports Secure Erase.",
+                            "estimated_minutes": 4,
+                        }
+                        if len(erase_plan_calls) == 1
+                        else {
+                            "available": True,
+                            "method": "quick_format_exfat",
+                            "secure": False,
+                            "detail": "Firmware erase is unavailable; Quick Format is the fallback.",
+                            "estimated_minutes": 1,
+                        }
+                    )
+                    route.fulfill(
+                        status=200,
+                        json={
+                            "quick": quick,
+                            "full": {
+                                "available": True,
+                                "method": "full_overwrite",
+                                "detail": "Every addressable block will be overwritten.",
+                            },
+                        },
+                    )
+
+                def erase_submit(route):
+                    body = route.request.post_data_json
+                    erase_posts.append(body)
+                    erase_attempts[body["profile"]] += 1
+                    if erase_attempts[body["profile"]] == 1:
+                        route.fulfill(
+                            status=409,
+                            json={"detail": "Erase method changed; review the new plan."},
+                        )
+                    else:
+                        route.fulfill(
+                            status=200,
+                            json={
+                                "status": "queued",
+                                "detail": "Erase queued.",
+                                "run": {
+                                    "id": f"fixture-{body['profile']}",
+                                    "profile": body["profile"],
+                                },
+                            },
+                        )
+
+                erase_page.route("**/api/drives/fixture-erase-drive/erase-plan", erase_plan)
+                erase_page.route("**/api/drives/fixture-erase-drive/erase", erase_submit)
+                erase_page.reload()
+                expect(
+                    erase_page.get_by_role("button", name="Quick erase", exact=True)
+                ).to_be_disabled()
+                expect(
+                    erase_page.get_by_role("button", name="Quick erase", exact=True)
+                ).to_have_attribute(
+                    "title", "Drive erase is disabled in the station configuration."
+                )
+                erase_state["settings"]["allow_destructive"] = True
+                erase_page.reload()
+                erase_page.get_by_role("button", name="Quick erase", exact=True).click()
+                expect(erase_page.locator("#erase-method")).to_contain_text(
+                    "ATA firmware Secure Erase"
+                )
+                erase_page.locator("#erase-confirmation").fill("QUICK ERASE wrong")
+                erase_page.locator("#erase-submit").click()
+                expect(erase_page.locator("#erase-error")).to_contain_text("exactly")
+                assert erase_posts == []
+                erase_page.locator("#erase-confirmation").fill("QUICK ERASE FIXTURE-ERASE-1")
+                erase_page.locator("#erase-submit").click()
+                expect(erase_page.locator("#erase-error")).to_contain_text("method changed")
+                erase_page.locator("#erase-confirmation").fill("QUICK ERASE FIXTURE-ERASE-1")
+                erase_page.locator("#erase-submit").click()
+                expect(erase_page.locator("#erase-dialog")).to_be_hidden()
+                assert erase_posts[-1]["expected_method"] == "ata_secure_erase"
+
+                erase_page.get_by_role("button", name="Quick erase", exact=True).click()
+                expect(erase_page.locator("#erase-method")).to_contain_text("NOT SECURE")
+                expect(erase_page.locator("#erase-method")).to_contain_text(
+                    "old files may be recoverable"
+                )
+                erase_page.locator("#erase-cancel").click()
+
+                erase_page.get_by_role("button", name="Full erase", exact=True).click()
+                expect(erase_page.locator("#erase-method")).to_contain_text("Complete overwrite")
+                erase_page.locator("#erase-confirmation").fill("FULL ERASE FIXTURE-ERASE-1")
+                erase_page.locator("#erase-submit").click()
+                expect(erase_page.locator("#erase-error")).to_contain_text("method changed")
+                erase_page.locator("#erase-confirmation").fill("FULL ERASE FIXTURE-ERASE-1")
+                erase_page.locator("#erase-submit").click()
+                expect(erase_page.locator("#erase-dialog")).to_be_hidden()
+                assert erase_posts[-1]["expected_method"] == "full_overwrite"
+                assert erase_posts[-1]["confirmation"] == "FULL ERASE FIXTURE-ERASE-1"
+                erase_state["runs"] = [
+                    {
+                        "id": "fixture-erase-report",
+                        "drive_id": erase_drive["id"],
+                        "drive": erase_drive,
+                        "profile": "quick_erase",
+                        "status": "warning",
+                        "workflow_status": "complete",
+                        "phase": "erase",
+                        "progress": 100,
+                        "detail": "Quick Format completed; recovery remains possible.",
+                        "created_at": "2099-01-01T00:00:00+00:00",
+                        "started_at": "2099-01-01T00:00:01+00:00",
+                        "finished_at": "2099-01-01T00:01:00+00:00",
+                        "results": {
+                            "erase": {
+                                "status": "warning",
+                                "method": "quick_format_exfat",
+                                "recovery_state": "Old file data may be recoverable",
+                                "recovery_required": True,
+                                "detail": "Only filesystem metadata was replaced.",
+                            }
+                        },
+                        "logs": [],
+                        "lifecycle": {},
+                    }
+                ]
+                erase_page.reload()
+                erase_page.locator('[data-run-id="fixture-erase-report"]').click()
+                expect(erase_page.locator("#report")).to_contain_text("Actual erase method")
+                expect(erase_page.locator("#report")).to_contain_text("Quick Format (exFAT)")
+                expect(erase_page.locator("#report")).to_contain_text(
+                    "Old files may still be recoverable"
+                )
+                erase_state["runs"] = [
+                    {
+                        **erase_state["runs"][0],
+                        "id": "fixture-awaiting-erase",
+                        "profile": "quick",
+                        "status": "passed",
+                        "workflow_status": "awaiting_action",
+                        "lifecycle": {"action_deadline": "2099-01-01T00:03:00+00:00"},
+                    }
+                ]
+                erase_state["system"]["active_run_id"] = "fixture-awaiting-erase"
+                erase_page.reload()
+                expect(
+                    erase_page.get_by_role("button", name="Quick erase", exact=True)
+                ).to_be_enabled()
+                erase_page.get_by_role("button", name="Quick erase", exact=True).click()
+                expect(erase_page.locator("#erase-deadline")).to_contain_text(
+                    "Opening this dialog does not pause the timer"
+                )
+                erase_page.locator("#erase-cancel").click()
+                erase_context.close()
+
                 context = browser.new_context(viewport={"width": 1440, "height": 1100})
                 page = context.new_page()
                 errors = []
@@ -376,7 +687,7 @@ def main():
                 assert not errors, errors
                 browser.close()
             print(
-                "Browser verification passed: one-time access links, login, SSE, Quick choice countdown/actions, readable failed SMART/self-test evidence, report export, dedicated settings, mobile, logout."
+                "Browser verification passed: access links, RAID takeover, firmware/fallback Quick erase, Full erase, method-bound confirmations, Quick choices, reports, settings, mobile, logout."
             )
         finally:
             server.should_exit = True

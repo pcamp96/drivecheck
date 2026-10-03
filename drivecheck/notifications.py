@@ -164,6 +164,19 @@ def run_message(run: dict, demo: bool = False) -> str:
     ]
     if run["status"] == "failed":
         lines.append(f"Why it failed: {failure_reason(run)}")
+    erase = run.get("results", {}).get("erase", {})
+    method = erase.get("method") or run.get("erase_method")
+    if method:
+        lines.append(
+            "Erase method: "
+            + {
+                "ata_secure_erase": "drive firmware secure erase",
+                "quick_format_exfat": "quick exFAT format (NOT secure erasure; old files may be recoverable)",
+                "full_overwrite": "complete overwrite with read-back verification",
+            }.get(method, str(method))
+        )
+    if erase.get("recovery_required"):
+        lines.append("Firmware erase recovery required. Do not power off or remove the drive.")
     if speed is not None:
         lines.append(f"Sequential read: {speed:.1f} MB/s")
     lifecycle = run.get("lifecycle", {})

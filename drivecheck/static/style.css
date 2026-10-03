@@ -134,7 +134,7 @@ main > section { max-width: 1350px; margin: 0 auto 58px; scroll-margin-top: 28px
 .progress-number span { font-size: 1.3rem; color: #9fb3cb; }
 .progress-track { height: 8px; margin: 22px 0 20px; overflow: hidden; border-radius: 5px; background: #405672; }
 .progress-track span { display: block; width: 0; height: 100%; background: #79a2f4; transition: width .35s ease; }
-.phase-track { display: grid; grid-template-columns: repeat(5, 1fr); margin: 0; padding: 0; list-style: none; counter-reset: phase; }
+.phase-track { display: grid; grid-template-columns: repeat(6, 1fr); margin: 0; padding: 0; list-style: none; counter-reset: phase; }
 .phase-track li { position: relative; padding: 19px 10px 0 0; color: #91a4bb; border-top: 2px solid #50657f; font-size: 12px; }
 .phase-track li::before { content: ""; position: absolute; left: 0; top: -6px; width: 10px; height: 10px; border: 2px solid var(--ink-2); border-radius: 50%; background: #718399; }
 .phase-track li.done { color: #bce6dc; border-color: #54a998; }
@@ -148,6 +148,8 @@ main > section { max-width: 1350px; margin: 0 auto 58px; scroll-margin-top: 28px
 .drive-list { display: grid; gap: 10px; }
 .drive-card { display: grid; grid-template-columns: minmax(220px, 1.5fr) minmax(120px, .65fr) minmax(135px, .7fr) auto; align-items: center; gap: 20px; padding: 17px 20px; border: 1px solid var(--line); border-left: 4px solid var(--teal); border-radius: 8px; background: white; }
 .drive-card.ineligible { border-left-color: var(--amber); }
+.ownership-summary { grid-column: 1 / -1; margin-top: 7px; padding: 8px 10px; border-left: 3px solid var(--amber); background: var(--amber-soft); font-size: 12px; }
+.ownership-summary p { margin: 2px 0; color: var(--ink); }
 .drive-main strong { display: block; font-size: 16px; }
 .drive-main .serial { display: block; margin-top: 3px; color: var(--slate); font-size: 12px; word-break: break-all; }
 .drive-meta span { display: block; color: var(--slate); font-size: 12px; }
@@ -263,6 +265,9 @@ dialog form { position: relative; padding: 30px; }
 .dialog-close { position: absolute; top: 10px; right: 12px; padding: 4px 10px; color: var(--slate); background: transparent; font-size: 24px; }
 .dialog-close:hover { color: var(--ink); background: #edf1f5; }
 .warning-mark { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 50%; color: white; background: var(--red); font-size: 21px; font-weight: 800; }
+.ownership-mark { background: var(--amber); }
+.erase-method { margin: 15px 0; padding: 12px 13px; border-left: 4px solid var(--teal); border-radius: 4px; background: var(--teal-soft); font-weight: 650; }
+.erase-method.warning { border-left-color: var(--red); background: var(--red-soft); color: #7e1b14; }
 dialog h2 { margin: 12px 0 8px; }
 dialog code { padding: 2px 4px; color: #821d14; background: var(--red-soft); border-radius: 3px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
