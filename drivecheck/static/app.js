@@ -257,7 +257,7 @@ function renderDrives() {
     connection.append(textNode("span", drive.path || "Unknown path"), textNode("strong", drive.transport || "Unknown transport"));
     const state = document.createElement("div");
     state.append(textNode("div", drive.eligible ? "Ready to test" : "Unavailable", "eligibility"));
-    if (drive.reasons?.length) state.append(textNode("p", drive.reasons.join(" · "), "drive-reasons"));
+    if (drive.reasons?.length) state.append(textNode("p", drive.reasons.map(reasonLabel).join(" · "), "drive-reasons"));
     const actions = document.createElement("div");
     actions.className = "drive-actions";
     actions.append(
@@ -276,6 +276,23 @@ function renderDrives() {
       button.dataset.driveId === focusedAction.driveId && button.dataset.profile === focusedAction.profile);
     restored?.focus({ preventScroll: true });
   }
+}
+
+function reasonLabel(reason) {
+  return ({
+    mounted: "Mounted volumes: unmount before testing",
+    missing_serial: "The USB bridge did not report a unique drive serial",
+    ambiguous_serial: "Multiple serials reported; identity is ambiguous",
+    duplicate_identity: "Duplicate drive identity reported by the adapter",
+    not_external_usb: "Only external USB drives can be tested",
+    system_drive: "System storage is protected",
+    swap_in_use: "Drive contains active swap",
+    not_physical_whole_disk: "A physical whole drive is required",
+    system_state_unknown: "System disk safety could not be verified",
+    apfs_state_unknown: "APFS safety could not be verified",
+    invalid_size: "Drive capacity could not be verified",
+    invalid_logical_sector: "Logical sector size could not be verified"
+  })[reason] || reason;
 }
 
 function runButton(label, drive, profile, extraDisabled, destructive = false) {

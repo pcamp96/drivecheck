@@ -13,7 +13,7 @@ checks do not establish Raspberry Pi performance or USB-adapter compatibility.
 See the acceptance test plan. No actual disks or notification accounts were used
 for development verification.
 
-Final local verification:
+Original v0.1 local verification:
 - 49 tests passed on both Python 3.11 and Python 3.13.
 - Browser acceptance passed: authenticated two-tab SSE, full simulated report
   and JSON export, cancellation, erase confirmation, both notification settings
@@ -28,3 +28,26 @@ Known verification boundary: Linux exclusive-claim/fio coexistence, actual drive
 SMART variants, physical I/O performance/coverage, and real provider delivery
 remain Monday acceptance items. No actual notifications were sent; provider
 requests were tested with mocked transports and disabled UI configurations.
+
+## Native macOS and unattended intake update — October 2, 2026
+
+Implemented native macOS discovery/read-only testing and normal unmount/eject,
+platform capability diagnostics, Pi headless environment configuration, automatic
+result-message-to-eject lifecycle, separate release confirmation, and durable
+restart handling. Linux USB power-off refuses shared or unknown enclosure scope.
+Unsupported macOS destructive verification stays blocked. Each run retains its
+test verdict independently from delivery/release outcomes.
+
+Live read-only inventory on this Mac matched the attached 4 TB WD USB drive to
+its actual serial through its ASM105x USB registry ancestor. The dashboard was
+verified against that inventory; no actual SMART self-tests, raw read/write I/O,
+unmount, eject, or provider messages were executed during development. fio was
+installed locally for owner testing. Raw tests require a privileged launch.
+
+Verification: 77 unit/integration tests passed on Python 3.11 and 3.13, including
+notification outage, confirmed release, cancellation, identity/mount safety,
+restart interruption and the Python 3.11 notifier shutdown race. The browser
+acceptance flow passed, plus real macOS inventory display and disabled test
+controls without root. Ruff, formatting, JavaScript/shell syntax and whitespace
+checks passed. Updated Pi source archive/wheel are available under ignored dist/.
+Physical Pi/dock behavior and real provider delivery remain acceptance items.

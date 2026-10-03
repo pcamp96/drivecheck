@@ -185,3 +185,45 @@ def test_invalid_authorization_never_falls_back_to_cookie_and_clear_secrets(tmp_
 def test_non_ascii_login_is_rejected_cleanly(tmp_path):
     with TestClient(app(tmp_path)) as client:
         assert client.post("/api/login", json={"token": "incorrect-é"}).status_code == 401
+
+
+def test_drive_release_authenticated_and_blocked_during_work(tmp_path):
+    from drivecheck.hardware import Hardware
+
+    class ReleaseHardware(Hardware):
+        released = 0
+
+        def capabilities(self):
+            return {
+                "platform": "fixture",
+                "can_test": True,
+                "can_verify": True,
+                "can_unmount": True,
+                "can_eject": True,
+                "tools": {},
+                "limitations": [],
+            }
+
+        async def eject(self, drive):
+            self.released += 1
+            return {"status": "ejected", "detail": "Fixture drive safely released"}
+
+    hardware = ReleaseHardware(demo=True)
+    instance = create_app(Config(tmp_path, api_key=TOKEN, demo_step_seconds=0.1), hardware)
+    with TestClient(instance) as client:
+        drive = client.get("/api/state", headers=AUTH).json()["drives"][0]
+        endpoint = f"/api/drives/{drive['id']}/eject"
+        assert client.post(endpoint).status_code == 401
+        assert hardware.released == 0
+        run = client.post(
+            "/api/runs", json={"drive_id": drive["id"], "profile": "extended"}, headers=AUTH
+        ).json()
+        assert client.post(endpoint, headers=AUTH).status_code == 409
+        assert hardware.released == 0
+        client.post(f"/api/runs/{run['id']}/cancel", headers=AUTH)
+        for _ in range(100):
+            if client.get("/api/state", headers=AUTH).json()["system"]["active_run_id"] is None:
+                break
+            time.sleep(0.01)
+        assert client.post(endpoint, headers=AUTH).status_code == 200
+        assert hardware.released == 1

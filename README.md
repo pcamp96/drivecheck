@@ -42,10 +42,11 @@ Stop the inventory process, then launch the existing virtual environment as root
 to run raw read tests (use a separate private data directory):
 
 ```sh
-sudo "$PWD/.venv/bin/drivecheck" --hardware --data-dir /var/db/drivecheck
+sudo env PATH="$PATH" "$PWD/.venv/bin/drivecheck" --hardware --data-dir /var/db/drivecheck --port 8766
 ```
 
-Sign in with `/var/db/drivecheck/access-token`. Close files/apps using the target,
+Open <http://127.0.0.1:8766> and sign in with `/var/db/drivecheck/access-token`.
+Port 8766 lets this testing station run alongside the inventory preview. Close files/apps using the target,
 then select **Unmount for testing**. This uses normal macOS unmounting and refuses
 busy volumes. Quick and Extended read the raw disk; they never write test data.
 macOS write verification is disabled because the Linux exclusive block claim is
