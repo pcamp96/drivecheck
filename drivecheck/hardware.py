@@ -12,13 +12,16 @@ import asyncio
 import hashlib
 import json
 import os
+import platform
 import re
+import shutil
 import signal
 import stat
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 Progress = Callable[[int, str], Awaitable[None]]
@@ -247,6 +250,31 @@ class Hardware:
         self.demo_step_seconds = 0.0
         self._logical_sector_bytes: dict[str, int] = {}
 
+    def capabilities(self) -> dict[str, Any]:
+        tools = {
+            name: bool(shutil.which(name)) for name in ("lsblk", "smartctl", "fio", "udisksctl")
+        }
+        root = hasattr(os, "geteuid") and os.geteuid() == 0
+        can_test = root and tools["lsblk"] and tools["fio"]
+        limitations: list[str] = []
+        if not root:
+            limitations.append("Raw drive tests require root privileges.")
+        if not tools["fio"]:
+            limitations.append("fio is required for read benchmarks and surface scans.")
+        if not tools["smartctl"]:
+            limitations.append("smartctl is unavailable; health coverage will be incomplete.")
+        if not tools["udisksctl"]:
+            limitations.append("udisksctl is unavailable; USB power-off is disabled.")
+        return {
+            "platform": "linux",
+            "can_test": can_test,
+            "can_verify": can_test,
+            "can_unmount": False,
+            "can_eject": tools["udisksctl"],
+            "tools": tools,
+            "limitations": limitations,
+        }
+
     async def discover(self) -> list[Drive]:
         if self.demo:
             return [Drive(**self._DEMO_DRIVE.to_dict())]
@@ -377,12 +405,95 @@ class Hardware:
             raise SafetyError("destructive verification requires a unique unmounted serial")
         return current
 
+    async def unmount(self, drive: Drive) -> dict[str, str]:
+        if self.demo:
+            return {"status": "unmounted", "detail": "Demo drive unmounted"}
+        return {
+            "status": "unsupported",
+            "detail": "Linux unmount is disabled; the dedicated station must not automount drives.",
+        }
+
+    async def eject(self, drive: Drive) -> dict[str, str]:
+        if self.demo:
+            return {"status": "ejected", "detail": "Demo drive ejected"}
+        if not shutil.which("udisksctl"):
+            return {"status": "unsupported", "detail": "udisksctl is unavailable"}
+        try:
+            current = await self.validate(drive)
+            siblings = self._usb_enclosure_siblings(current.path)
+            if siblings:
+                raise SafetyError(
+                    "USB enclosure contains other disks: " + ", ".join(sorted(siblings))
+                )
+        except (SafetyError, CommandError) as exc:
+            return {"status": "failed", "detail": str(exc)}
+        result = await self._runner.run(
+            "udisksctl",
+            "power-off",
+            "--no-user-interaction",
+            "-b",
+            current.path,
+            timeout=60,
+        )
+        if result.returncode:
+            return {
+                "status": "failed",
+                "detail": result.stderr.strip() or "udisksctl could not power off the drive",
+            }
+        try:
+            remaining = await self.discover()
+        except (SafetyError, CommandError):
+            return {
+                "status": "failed",
+                "detail": "Power-off returned success, but disappearance could not be verified",
+            }
+        if any(candidate.identity == current.identity for candidate in remaining):
+            return {"status": "failed", "detail": "Drive remains visible after power-off"}
+        return {"status": "ejected", "detail": "USB drive powered off and is safe to remove"}
+
+    @staticmethod
+    def _usb_enclosure_siblings(path: str) -> set[str]:
+        target_name = Path(path).name
+        class_root = Path("/sys/class/block")
+        target_link = class_root / target_name / "device"
+        try:
+            target_parts = target_link.resolve(strict=True).parts
+        except OSError as exc:
+            raise SafetyError("USB enclosure scope could not be identified") from exc
+
+        def enclosure(parts: tuple[str, ...]) -> tuple[str, ...] | None:
+            for index in range(len(parts) - 1, -1, -1):
+                if re.fullmatch(r"\d+-\d+(?:\.\d+)*", parts[index]):
+                    return parts[: index + 1]
+            return None
+
+        target_enclosure = enclosure(target_parts)
+        if target_enclosure is None:
+            raise SafetyError("USB enclosure scope could not be identified")
+        siblings: set[str] = set()
+        try:
+            entries = list(class_root.iterdir())
+        except OSError as exc:
+            raise SafetyError("USB enclosure siblings could not be enumerated") from exc
+        for entry in entries:
+            if entry.name == target_name or (entry / "partition").exists():
+                continue
+            try:
+                candidate = (entry / "device").resolve(strict=True)
+            except OSError:
+                continue
+            if enclosure(candidate.parts) == target_enclosure:
+                siblings.add(f"/dev/{entry.name}")
+        return siblings
+
     async def smart(self, drive: Drive) -> dict[str, Any]:
         current = await self.validate(drive)
         if self.demo:
             raw = self._demo_smart()
             return {"health": "passed", "warnings": [], "raw": raw}
-        result = await self._runner.run("smartctl", "-a", "-j", current.path, timeout=45)
+        result = await self._runner.run(
+            "smartctl", "-a", "-j", self._smart_path(current), timeout=45
+        )
         try:
             raw = json.loads(result.stdout)
         except json.JSONDecodeError:
@@ -481,7 +592,9 @@ class Hardware:
                     "raw": initial["raw"],
                 }
             initial_entry = self._latest_self_test(initial["raw"])
-            started = await self._runner.run("smartctl", "-t", "long", current.path, timeout=45)
+            started = await self._runner.run(
+                "smartctl", "-t", "long", self._smart_path(current), timeout=45
+            )
             combined = f"{started.stdout}\n{started.stderr}".lower()
             if started.returncode & 0b00000111 or "unsupported" in combined:
                 return {
@@ -744,7 +857,7 @@ class Hardware:
             f"--filename={current.path}",
             "--allow_file_create=0",
             "--direct=1",
-            "--ioengine=libaio",
+            f"--ioengine={self._fio_engine()}",
             "--iodepth=16",
             f"--bs={block_size}",
             "--output-format=json",
@@ -842,6 +955,14 @@ class Hardware:
         return device_stat.st_rdev
 
     @staticmethod
+    def _fio_engine() -> str:
+        return "libaio"
+
+    @staticmethod
+    def _smart_path(drive: Drive) -> str:
+        return drive.path
+
+    @staticmethod
     @contextmanager
     def _exclusive_claim(path: str):
         flags = os.O_RDONLY | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | os.O_CLOEXEC
@@ -909,7 +1030,7 @@ class Hardware:
             return
         try:
             current = await self.validate(drive)
-            await self._runner.run("smartctl", "-X", current.path, timeout=30)
+            await self._runner.run("smartctl", "-X", self._smart_path(current), timeout=30)
         except (CommandError, SafetyError, asyncio.CancelledError):
             # Cancellation remains best effort; the job is never reported passed.
             pass
@@ -928,4 +1049,21 @@ class Hardware:
         }
 
 
-__all__ = ["CommandError", "CommandResult", "CommandRunner", "Drive", "Hardware", "SafetyError"]
+__all__ = [
+    "CommandError",
+    "CommandResult",
+    "CommandRunner",
+    "Drive",
+    "Hardware",
+    "SafetyError",
+    "get_hardware",
+]
+
+
+def get_hardware(demo: bool) -> Hardware:
+    """Return the native hardware adapter without importing macOS code on Linux."""
+    if platform.system() == "Darwin":
+        from drivecheck.macos import MacHardware
+
+        return MacHardware(demo=demo)
+    return Hardware(demo=demo)

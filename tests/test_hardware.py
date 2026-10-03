@@ -9,7 +9,14 @@ from contextlib import nullcontext
 
 import pytest
 
-from drivecheck.hardware import CommandError, CommandResult, CommandRunner, Hardware, SafetyError
+from drivecheck.hardware import (
+    CommandError,
+    CommandResult,
+    CommandRunner,
+    Hardware,
+    SafetyError,
+    get_hardware,
+)
 
 
 def result(args: tuple[str, ...], payload: object, returncode: int = 0) -> CommandResult:
@@ -114,6 +121,26 @@ async def test_demo_never_runs_host_commands() -> None:
     assert len(drives) == 1
     assert drives[0].eligible
     assert (await hardware.smart(drives[0]))["health"] == "passed"
+    assert (await hardware.unmount(drives[0]))["status"] == "unmounted"
+    assert (await hardware.eject(drives[0]))["status"] == "ejected"
+
+
+def test_platform_factory_selects_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("drivecheck.hardware.platform.system", lambda: "Darwin")
+    assert get_hardware(demo=True).__class__.__name__ == "MacHardware"
+
+
+def test_linux_capabilities_require_root_and_fio(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("drivecheck.hardware.os.geteuid", lambda: 1000)
+    monkeypatch.setattr(
+        "drivecheck.hardware.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name != "smartctl" else None,
+    )
+    report = Hardware(demo=False).capabilities()
+    assert report["platform"] == "linux"
+    assert report["can_test"] is False
+    assert report["can_verify"] is False
+    assert any("smartctl" in limitation for limitation in report["limitations"])
 
 
 @pytest.mark.asyncio
@@ -170,6 +197,41 @@ async def test_validate_rejects_same_identity_at_new_path(monkeypatch: pytest.Mo
     drive = (await hardware.discover())[0]
     with pytest.raises(SafetyError, match="path changed"):
         await hardware.validate(drive)
+
+
+@pytest.mark.asyncio
+async def test_linux_eject_refuses_multidisk_usb_enclosure(monkeypatch: pytest.MonkeyPatch) -> None:
+    hardware = Hardware(demo=False)
+    discovery(hardware, lsblk(disk()), lsblk(disk()))
+    operation = FakeRunner([])
+    hardware._runner = operation
+    monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
+    monkeypatch.setattr("drivecheck.hardware.shutil.which", lambda _: "/usr/bin/udisksctl")
+    monkeypatch.setattr(hardware, "_usb_enclosure_siblings", lambda _: {"/dev/sdb"})
+    drive = (await hardware.discover())[0]
+    report = await hardware.eject(drive)
+    assert report["status"] == "failed"
+    assert "/dev/sdb" in report["detail"]
+    assert operation.calls == []
+
+
+@pytest.mark.asyncio
+async def test_linux_eject_powers_off_only_verified_single_disk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = Hardware(demo=False)
+    discovery(hardware, lsblk(disk()), lsblk(disk()), lsblk())
+    operation = FakeRunner([CommandResult(("udisksctl",), 0, "Powered off", "")])
+    hardware._runner = operation
+    monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
+    monkeypatch.setattr("drivecheck.hardware.shutil.which", lambda _: "/usr/bin/udisksctl")
+    monkeypatch.setattr(hardware, "_usb_enclosure_siblings", lambda _: set())
+    drive = (await hardware.discover())[0]
+    report = await hardware.eject(drive)
+    assert report["status"] == "ejected"
+    assert operation.calls == [
+        ("udisksctl", "power-off", "--no-user-interaction", "-b", "/dev/sda")
+    ]
 
 
 @pytest.mark.asyncio
