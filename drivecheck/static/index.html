@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#182b45">
+  <title>DriveCheck</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to dashboard</a>
+
+  <section class="login-shell" id="login-view" aria-labelledby="login-title">
+    <div class="login-mark" aria-hidden="true">
+      <span></span><span></span><span></span><span></span>
+    </div>
+    <div class="login-panel">
+      <p class="product-name">DriveCheck</p>
+      <h1 id="login-title">Open the workbench</h1>
+      <p>Enter the access token set on this station. The token stays in an HTTP-only session cookie.</p>
+      <form id="login-form">
+        <label for="token">Access token</label>
+        <div class="field-row">
+          <input id="token" name="token" type="password" autocomplete="current-password" required autofocus>
+          <button type="submit">Sign in</button>
+        </div>
+        <p class="form-error" id="login-error" role="alert"></p>
+      </form>
+    </div>
+  </section>
+
+  <div class="app-shell" id="app-view" hidden>
+    <aside class="station-rail" aria-label="Station status">
+      <div>
+        <a class="brand" href="#main" aria-label="DriveCheck dashboard">
+          <span class="brand-symbol" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>DriveCheck</span>
+        </a>
+        <div class="mode-flag" id="mode-flag">Connecting</div>
+        <dl class="station-facts">
+          <div><dt>Station</dt><dd id="connection-status"><span class="status-dot"></span>Connecting</dd></div>
+          <div><dt>Drives found</dt><dd id="drive-count">—</dd></div>
+          <div><dt>Active test</dt><dd id="active-summary">None</dd></div>
+          <div><dt>Version</dt><dd id="version">—</dd></div>
+        </dl>
+      </div>
+      <nav aria-label="Dashboard sections">
+        <a href="#active">Active test</a>
+        <a href="#drives">Drive inventory</a>
+        <a href="#history">History</a>
+        <a href="#settings">Settings</a>
+      </nav>
+      <div class="rail-actions">
+        <button class="quiet-button" id="scan-button" type="button">Scan for drives</button>
+        <button class="text-button" id="logout-button" type="button">Sign out</button>
+      </div>
+    </aside>
+
+    <main id="main">
+      <header class="page-header">
+        <div>
+          <p class="date-line" id="date-line"></p>
+          <h1>Drive intake workbench</h1>
+        </div>
+        <div class="stream-state" id="stream-state" role="status"><span></span>Connecting to live updates</div>
+      </header>
+
+      <div class="global-error" id="global-error" role="alert" hidden></div>
+
+      <section class="active-panel" id="active" aria-labelledby="active-title">
+        <div class="section-heading">
+          <div><h2 id="active-title">Active test</h2><p id="active-subtitle">The station is ready for a drive.</p></div>
+          <button class="danger-outline" id="cancel-button" type="button" hidden>Cancel test</button>
+        </div>
+        <div id="active-empty" class="active-empty">
+          <div class="drive-platter" aria-hidden="true"><span></span></div>
+          <p>Select an eligible drive below to begin a repeatable intake test.</p>
+        </div>
+        <div id="active-content" hidden>
+          <div class="active-readout">
+            <div>
+              <p class="run-identity" id="active-drive">—</p>
+              <p class="serial" id="active-serial">—</p>
+            </div>
+            <div class="progress-number"><strong id="active-percent">0</strong><span>%</span></div>
+          </div>
+          <div class="progress-track" aria-label="Test progress"><span id="progress-bar"></span></div>
+          <ol class="phase-track" id="phase-track">
+            <li data-phase="smart_before">Health check</li>
+            <li data-phase="self_test">Self-test</li>
+            <li data-phase="benchmark">Read benchmark</li>
+            <li data-phase="surface">Surface scan</li>
+            <li data-phase="smart_after">Final health</li>
+          </ol>
+          <p class="active-detail" id="active-detail"></p>
+        </div>
+      </section>
+
+      <section id="drives" aria-labelledby="drives-title">
+        <div class="section-heading">
+          <div><h2 id="drives-title">Drive inventory</h2><p>Testing is read-only unless you explicitly arm a full-drive verification.</p></div>
+        </div>
+        <div class="drive-list" id="drive-list"></div>
+        <div class="empty-state" id="drives-empty" hidden><strong>No drives detected</strong><span>Connect a drive through a powered SATA adapter, then scan again.</span></div>
+      </section>
+
+      <section id="history" aria-labelledby="history-title">
+        <div class="section-heading">
+          <div><h2 id="history-title">Test history</h2><p>Select a run to inspect its evidence and logs.</p></div>
+        </div>
+        <div class="history-layout">
+          <div class="run-list" id="run-list" role="list"></div>
+          <article class="report" id="report" aria-live="polite">
+            <div class="report-empty">Select a completed or active run.</div>
+          </article>
+        </div>
+      </section>
+
+      <section id="settings" aria-labelledby="settings-title">
+        <div class="section-heading">
+          <div><h2 id="settings-title">Station settings</h2><p>Notification credentials remain stored on the station and are never returned here.</p></div>
+        </div>
+        <form class="settings-grid" id="settings-form">
+          <fieldset>
+            <legend>Automation</legend>
+            <label class="switch-row" for="auto-test"><span><strong>Test new drives automatically</strong><small>Starts the safe extended profile when an eligible drive appears.</small></span><input type="checkbox" id="auto-test"><i aria-hidden="true"></i></label>
+            <div class="read-only-settings"><span>Destructive verification</span><strong id="destructive-setting">Disabled</strong><span>Hardware access</span><strong id="hardware-setting">—</strong></div>
+          </fieldset>
+          <fieldset>
+            <legend>Notifications</legend>
+            <label class="switch-row" for="notifications-enabled"><span><strong>Send test updates</strong><small>Receive status messages from the selected provider.</small></span><input type="checkbox" id="notifications-enabled"><i aria-hidden="true"></i></label>
+            <label for="notification-provider">Provider</label>
+            <select id="notification-provider">
+              <option value="none">None</option>
+              <option value="discord">Discord</option>
+              <option value="telegram">Telegram</option>
+            </select>
+            <div id="discord-fields" hidden>
+              <label for="discord-webhook">Discord webhook</label>
+              <input id="discord-webhook" type="password" autocomplete="off" placeholder="Leave blank to keep the saved webhook">
+              <p class="configured-note" id="discord-configured"></p>
+            </div>
+            <div id="telegram-fields" hidden>
+              <label for="telegram-token">Telegram bot token</label>
+              <input id="telegram-token" type="password" autocomplete="off" placeholder="Leave blank to keep the saved token">
+              <p class="configured-note" id="telegram-configured"></p>
+              <label for="telegram-chat">Telegram chat ID</label>
+              <input id="telegram-chat" type="text" autocomplete="off">
+            </div>
+            <label class="check-row" for="notify-started"><input type="checkbox" id="notify-started"> Notify when a test starts</label>
+            <div class="form-actions">
+              <button type="submit">Save settings</button>
+              <button type="button" class="quiet-button" id="test-notification">Send test message</button>
+            </div>
+            <p class="form-status" id="settings-status" role="status"></p>
+          </fieldset>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="verify-dialog" aria-labelledby="verify-title">
+    <form method="dialog" id="verify-form">
+      <button class="dialog-close" value="cancel" aria-label="Close verification dialog">×</button>
+      <p class="warning-mark" aria-hidden="true">!</p>
+      <h2 id="verify-title">Erase and verify this drive?</h2>
+      <p>This test writes across the entire drive. Every partition and file on <strong id="verify-drive-name"></strong> will be permanently erased.</p>
+      <label for="verify-confirmation">Type <code id="verify-phrase"></code> to continue</label>
+      <input id="verify-confirmation" type="text" autocomplete="off" spellcheck="false">
+      <p class="form-error" id="verify-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button value="cancel" class="quiet-button">Keep data</button>
+        <button value="confirm" class="danger-button" id="verify-submit">Erase and verify</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toasts" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>
