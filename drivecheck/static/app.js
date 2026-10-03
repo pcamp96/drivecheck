@@ -405,7 +405,6 @@ elements.cancelButton.addEventListener("click", async () => {
 
 elements.verifyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (event.submitter?.value !== "confirm") { elements.verifyDialog.close(); return; }
   const phrase = `ERASE ${verifyDrive?.serial || ""}`;
   if (elements.verifyConfirmation.value !== phrase) {
     elements.verifyError.textContent = `Enter “${phrase}” exactly.`;
@@ -414,6 +413,9 @@ elements.verifyForm.addEventListener("submit", async (event) => {
   elements.verifyDialog.close();
   await startRun(verifyDrive, "verify", phrase);
 });
+
+$("#verify-close").addEventListener("click", () => elements.verifyDialog.close());
+$("#verify-cancel").addEventListener("click", () => elements.verifyDialog.close());
 
 elements.settingsForm.addEventListener("input", () => { settingsDirty = true; });
 elements.provider.addEventListener("change", showProviderFields);

@@ -163,7 +163,7 @@
 
   <dialog id="verify-dialog" aria-labelledby="verify-title">
     <form method="dialog" id="verify-form">
-      <button class="dialog-close" value="cancel" aria-label="Close verification dialog">×</button>
+      <button class="dialog-close" id="verify-close" type="button" aria-label="Close verification dialog">×</button>
       <p class="warning-mark" aria-hidden="true">!</p>
       <h2 id="verify-title">Erase and verify this drive?</h2>
       <p>This test writes across the entire drive. Every partition and file on <strong id="verify-drive-name"></strong> will be permanently erased.</p>
@@ -171,8 +171,8 @@
       <input id="verify-confirmation" type="text" autocomplete="off" spellcheck="false">
       <p class="form-error" id="verify-error" role="alert"></p>
       <div class="dialog-actions">
-        <button value="cancel" class="quiet-button">Keep data</button>
-        <button value="confirm" class="danger-button" id="verify-submit">Erase and verify</button>
+        <button type="button" class="quiet-button" id="verify-cancel">Keep data</button>
+        <button type="submit" class="danger-button" id="verify-submit">Erase and verify</button>
       </div>
     </form>
   </dialog>
