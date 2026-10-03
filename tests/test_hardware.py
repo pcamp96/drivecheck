@@ -313,6 +313,41 @@ async def test_self_test_does_not_adopt_existing_test(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
+async def test_observed_running_test_can_complete_with_identical_log_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = Hardware(demo=False)
+    completed = {
+        "smart_status": {"passed": True},
+        "ata_smart_self_test_log": {
+            "standard": {"table": [{"status": {"string": "Completed without error"}}]}
+        },
+    }
+    running = {
+        "smart_status": {"passed": True},
+        "ata_smart_data": {"self_test": {"status": {"remaining_percent": 50}}},
+        **{key: value for key, value in completed.items() if key != "smart_status"},
+    }
+    discovery(hardware, *(lsblk(disk()) for _ in range(7)))
+    hardware._runner = FakeRunner(
+        [
+            result(("smartctl",), completed),
+            CommandResult(("smartctl",), 0, "started", ""),
+            result(("smartctl",), running),
+            result(("smartctl",), completed),
+        ]
+    )
+    hardware.self_test_poll_seconds = 0
+    monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
+    drive = (await hardware.discover())[0]
+
+    async def progress(_: int, __: str) -> None:
+        pass
+
+    assert (await hardware.self_test(drive, progress))["status"] == "passed"
+
+
+@pytest.mark.asyncio
 async def test_self_test_timeout_aborts_only_after_identity_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -387,6 +422,28 @@ async def test_fio_safety_poll_cancels_when_drive_becomes_mounted(
     report = await hardware.surface(drive, progress)
     assert report["status"] == "incomplete"
     assert "mounted" in report["detail"]
+    assert operation.cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_fio_task_cancellation_does_not_orphan_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = Hardware(demo=False)
+    discovery(hardware, *(lsblk(disk()) for _ in range(3)))
+    operation = BlockingRunner()
+    hardware._runner = operation
+    monkeypatch.setattr(hardware, "_swap_paths", lambda: asyncio.sleep(0, result=set()))
+    drive = (await hardware.discover())[0]
+
+    async def progress(_: int, __: str) -> None:
+        pass
+
+    task = asyncio.create_task(hardware.surface(drive, progress))
+    await operation.started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     assert operation.cancelled is True
 
 
@@ -548,4 +605,19 @@ async def test_command_runner_cancellation_kills_child() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert runner._process is None
+
+
+@pytest.mark.asyncio
+async def test_command_runner_callback_failure_stops_child_immediately() -> None:
+    runner = CommandRunner()
+
+    async def fail(_: str) -> None:
+        raise RuntimeError("persistence failed")
+
+    command = "import time; print('status', flush=True); time.sleep(30)"
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(RuntimeError, match="persistence failed"):
+        await runner.run(sys.executable, "-c", command, timeout=60, stdout_chunk=fail)
+    assert asyncio.get_running_loop().time() - started < 2
     assert runner._process is None

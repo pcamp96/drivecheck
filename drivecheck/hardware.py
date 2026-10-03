@@ -89,20 +89,46 @@ class CommandRunner:
             except (FileNotFoundError, PermissionError, OSError) as exc:
                 raise CommandError(f"could not start {args[0]}: {exc}") from exc
             self._process = process
-            stdout_task = asyncio.create_task(self._read(process.stdout, stdout_chunk))
-            stderr_task = asyncio.create_task(self._read(process.stderr, stderr_line))
+            callback_failure: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            stdout_task = asyncio.create_task(
+                self._read(process.stdout, stdout_chunk, callback_failure)
+            )
+            stderr_task = asyncio.create_task(
+                self._read(process.stderr, stderr_line, callback_failure)
+            )
+            process_task = asyncio.create_task(process.wait())
             try:
-                await asyncio.wait_for(process.wait(), timeout=timeout)
+                done, _ = await asyncio.wait(
+                    {process_task, callback_failure},
+                    timeout=timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    raise TimeoutError
+                if callback_failure in done:
+                    error = callback_failure.exception()
+                    await self._terminate(process)
+                    await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                    await process_task
+                    if error is not None:
+                        raise error
+                await process_task
             except TimeoutError as exc:
                 await self._terminate(process)
                 await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                process_task.cancel()
                 raise CommandError(f"command timed out after {timeout:g}s") from exc
             except asyncio.CancelledError:
                 await self._terminate(process)
                 await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                process_task.cancel()
                 raise
             finally:
                 self._process = None
+                if not callback_failure.done():
+                    callback_failure.cancel()
+                elif not callback_failure.cancelled():
+                    callback_failure.exception()
             (stdout, out_cut), (stderr, err_cut) = await asyncio.gather(stdout_task, stderr_task)
             return CommandResult(tuple(args), process.returncode or 0, stdout, stderr, out_cut or err_cut)
 
@@ -115,6 +141,7 @@ class CommandRunner:
         self,
         stream: asyncio.StreamReader | None,
         callback: Callable[[str], Awaitable[None]] | None = None,
+        callback_failure: asyncio.Future[None] | None = None,
     ) -> tuple[str, bool]:
         if stream is None:
             return "", False
@@ -133,6 +160,8 @@ class CommandRunner:
                     await callback(chunk.decode(errors="replace"))
                 except Exception as exc:  # drain the pipe before surfacing callback failure
                     callback_error = exc
+                    if callback_failure is not None and not callback_failure.done():
+                        callback_failure.set_exception(exc)
             remaining = self.output_limit - length
             if remaining > 0:
                 kept = chunk[:remaining]
@@ -451,6 +480,7 @@ class Hardware:
                 return {"status": "unsupported", "detail": "Extended self-test is unsupported", "raw": {}}
             await progress(0, "Extended SMART self-test started")
             deadline = time.monotonic() + self.self_test_timeout_seconds
+            observed_running = False
             while True:
                 if self._cancel_requested:
                     raise asyncio.CancelledError
@@ -475,10 +505,11 @@ class Hardware:
                 raw = snapshot["raw"]
                 remaining = self._remaining_percent(raw)
                 if remaining is not None and remaining > 0:
+                    observed_running = True
                     await progress(max(1, 100 - remaining), "Extended SMART self-test running")
                     continue
                 latest_entry = self._latest_self_test(raw)
-                if latest_entry is None or latest_entry == initial_entry:
+                if latest_entry is None or (latest_entry == initial_entry and not observed_running):
                     # Some bridges omit execution status.  Never mistake the
                     # previous log's successful entry for the test we started.
                     await progress(1, "Waiting for a new SMART self-test result")
@@ -681,23 +712,26 @@ class Hardware:
         if not destructive:
             command_parts.append("--readonly")
         command = (*command_parts, *args)
-        io_task = asyncio.create_task(
-            self._runner.run(*command, timeout=timeout, stdout_chunk=parse_status)
-        )
+        io_task = asyncio.create_task(self._runner.run(*command, timeout=timeout, stdout_chunk=parse_status))
         safety_error: SafetyError | CommandError | None = None
-        while not io_task.done():
-            done, _ = await asyncio.wait({io_task}, timeout=self.io_safety_poll_seconds)
-            if done:
-                break
-            try:
-                await self.validate(current, destructive=destructive)
-                if self._pin_device(current.path) != device_number:
-                    raise SafetyError("block device number changed")
-            except (SafetyError, CommandError) as exc:
-                safety_error = exc
-                await self._runner.cancel()
-                break
-        result = await io_task
+        try:
+            while not io_task.done():
+                done, _ = await asyncio.wait({io_task}, timeout=self.io_safety_poll_seconds)
+                if done:
+                    break
+                try:
+                    await self.validate(current, destructive=destructive)
+                    if self._pin_device(current.path) != device_number:
+                        raise SafetyError("block device number changed")
+                except (SafetyError, CommandError) as exc:
+                    safety_error = exc
+                    await self._runner.cancel()
+                    break
+            result = await io_task
+        except asyncio.CancelledError:
+            await self._runner.cancel()
+            await asyncio.gather(io_task, return_exceptions=True)
+            raise
         if safety_error is not None:
             return {"status": "incomplete", "detail": str(safety_error), "raw": {}}
         if stream_invalid:
