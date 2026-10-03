@@ -224,6 +224,11 @@ main > section { max-width: 1350px; margin: 0 auto 58px; scroll-margin-top: 28px
 .report-action-status { margin-top: 10px !important; color: var(--ink) !important; font-weight: 650; }
 .report h4 { margin: 23px 0 8px; }
 
+.awaiting-action { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 18px; padding: 15px; border: 1px solid #c8a34d; border-left: 4px solid var(--amber); border-radius: 6px; background: var(--amber-soft); }
+.awaiting-action[hidden] { display: none; }
+.awaiting-action p { margin: 4px 0 0; color: var(--slate); }
+.action-buttons { display: flex; flex: none; flex-wrap: wrap; gap: 8px; }
+
 .settings-view { max-width: 880px; margin-left: 0; }
 .settings-grid { display: grid; grid-template-columns: minmax(0, 780px); gap: 18px; }
 .settings-grid fieldset { min-width: 0; margin: 0; padding: 20px; border: 1px solid var(--line); border-radius: 8px; background: white; }
@@ -244,6 +249,9 @@ main > section { max-width: 1350px; margin: 0 auto 58px; scroll-margin-top: 28px
 .check-row input { width: 17px; min-height: 17px; }
 .form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 19px; }
 .configured-note, .form-status { margin: 4px 0; color: var(--slate); font-size: 12px; }
+.number-with-unit { display: flex; align-items: center; gap: 10px; max-width: 260px; }
+.number-with-unit input { width: 150px; }
+.number-with-unit span { color: var(--slate); }
 .credential-status { margin: 14px 0 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 5px; color: var(--slate); background: var(--chalk); font-size: 14px; font-weight: 650; }
 .credential-status.is-saved { color: var(--teal); border-color: var(--teal); background: var(--teal-soft); }
 .forget-button { padding: 3px 0; color: var(--red); background: transparent; font-size: 12px; font-weight: 650; }
@@ -299,6 +307,7 @@ dialog code { padding: 2px 4px; color: #821d14; background: var(--red-soft); bor
   .settings-grid, .run-list { grid-template-columns: 1fr; }
   .report-head { display: block; }
   .report-downloads { justify-content: flex-start; margin-top: 13px; }
+  .awaiting-action { align-items: flex-start; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {

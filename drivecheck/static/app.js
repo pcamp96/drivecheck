@@ -10,13 +10,15 @@ const elements = {
   activeSubtitle: $("#active-subtitle"), activeDrive: $("#active-drive"), activeSerial: $("#active-serial"),
   activePercent: $("#active-percent"), progressBar: $("#progress-bar"), activeDetail: $("#active-detail"),
   phaseTrack: $("#phase-track"), cancelButton: $("#cancel-button"), runList: $("#run-list"),
+  awaitingAction: $("#awaiting-action"), actionCountdown: $("#action-countdown"),
+  actionExtended: $("#action-extended"), actionEject: $("#action-eject"),
   report: $("#report"), settingsForm: $("#settings-form"), autoTest: $("#auto-test"),
-  autoEject: $("#auto-eject"), automationNote: $("#automation-note"), automationStatus: $("#automation-status"), platformNotice: $("#platform-notice"),
+  autoEject: $("#auto-eject"), autoEjectDelay: $("#auto-eject-delay"), automationNote: $("#automation-note"), automationStatus: $("#automation-status"), platformNotice: $("#platform-notice"),
   notificationsEnabled: $("#notifications-enabled"), provider: $("#notification-provider"),
   discordFields: $("#discord-fields"), discordWebhook: $("#discord-webhook"),
   discordConfigured: $("#discord-configured"), forgetDiscord: $("#forget-discord"),
   telegramFields: $("#telegram-fields"),
-  telegramToken: $("#telegram-token"), telegramChat: $("#telegram-chat"),
+  telegramToken: $("#telegram-token"), telegramChat: $("#telegram-chat"), telegramUser: $("#telegram-user"), providerNote: $("#provider-note"),
   telegramConfigured: $("#telegram-configured"), forgetTelegram: $("#forget-telegram"),
   notifyStarted: $("#notify-started"), notifyReady: $("#notify-ready"),
   destructiveSetting: $("#destructive-setting"), hardwareSetting: $("#hardware-setting"),
@@ -34,10 +36,24 @@ let verifyDrive = null;
 let settingsDirty = false;
 let automationSaving = false;
 let reconnectTimer = null;
+let actionCountdownTimer = null;
 let driveRenderSignature = null;
 let focusActiveRunOnRender = false;
 const reportActionPending = new Set();
 const reportActionNotes = new Map();
+let choosingAction = false;
+let chosenActionRunId = null;
+
+function takeAccessFragment() {
+  if (!window.location.hash.startsWith("#access=")) return null;
+  const values = new URLSearchParams(window.location.hash.slice(1));
+  const token = values.get("access");
+  const runId = values.get("run") || "";
+  history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+  return token ? { token, runId } : null;
+}
+
+const accessFragment = takeAccessFragment();
 
 function textNode(tag, text, className) {
   const node = document.createElement(tag);
@@ -168,10 +184,15 @@ function activeRun() {
     snapshot.runs.find((run) => run.status === "running" || run.status === "queued") || null;
 }
 
+function awaitingActionRun() {
+  if (!snapshot) return null;
+  return snapshot.runs.find((run) => run.workflow_status === "awaiting_action") || null;
+}
+
 function applySnapshot(next) {
   snapshot = next;
   showDashboard();
-  const systemErrors = [next.system?.station_error, next.system?.discovery_error, next.system?.notification_error].filter(Boolean);
+  const systemErrors = [next.system?.station_error, next.system?.discovery_error, next.system?.notification_error, next.system?.telegram_error].filter(Boolean);
   showError(systemErrors.join(" "));
   renderStation();
   renderActive();
@@ -191,18 +212,22 @@ function renderStation() {
   dot.className = `status-dot ${snapshot.connected ? "live" : ""}`;
   elements.connection.append(dot, document.createTextNode(snapshot.connected ? "Online" : "Offline"));
   elements.driveCount.textContent = String(snapshot.drives?.length || 0);
-  elements.activeSummary.textContent = activeRun() ? "Running" : "None";
+  elements.activeSummary.textContent = awaitingActionRun() ? "Waiting for action" : (activeRun() ? "Running" : "None");
   elements.version.textContent = snapshot.version || "—";
 }
 
 const phaseOrder = ["smart_before", "self_test", "benchmark", "surface", "smart_after"];
 
 function renderActive() {
-  const run = activeRun();
+  const run = activeRun() || awaitingActionRun();
+  const awaiting = run?.workflow_status === "awaiting_action";
+  if (!awaiting || chosenActionRunId !== run?.id) chosenActionRunId = null;
   const cancelHadFocus = document.activeElement === elements.cancelButton;
   elements.activeEmpty.hidden = Boolean(run);
   elements.activeContent.hidden = !run;
-  elements.cancelButton.hidden = !run;
+  elements.cancelButton.hidden = !run || awaiting;
+  elements.awaitingAction.hidden = !awaiting;
+  window.clearInterval(actionCountdownTimer);
   if (!run) {
     elements.activeSubtitle.textContent = "The station is ready for a drive.";
     if (cancelHadFocus || focusActiveRunOnRender) {
@@ -212,7 +237,7 @@ function renderActive() {
     return;
   }
   const drive = run.drive || {};
-  elements.activeSubtitle.textContent = `${profileLabel(run.profile)} profile · ${statusLabel(run.status)}`;
+  elements.activeSubtitle.textContent = awaiting ? "Quick profile · Waiting for your choice" : `${profileLabel(run.profile)} profile · ${statusLabel(run.status)}`;
   elements.activeDrive.textContent = drive.model || run.drive_id || "Unknown drive";
   elements.activeSerial.textContent = drive.serial || "Serial unavailable";
   const progress = Math.max(0, Math.min(100, Number(run.progress) || 0));
@@ -220,6 +245,10 @@ function renderActive() {
   elements.progressBar.style.width = `${progress}%`;
   elements.activeDetail.textContent = run.detail || phaseLabel(run.phase);
   elements.cancelButton.dataset.runId = run.id;
+  if (awaiting) {
+    updateActionCountdown(run);
+    actionCountdownTimer = window.setInterval(() => updateActionCountdown(run), 1000);
+  }
   const runPhases = run.profile === "quick"
     ? ["smart_before", "benchmark", "smart_after"]
     : phaseOrder;
@@ -237,6 +266,23 @@ function renderActive() {
     focusActiveRunOnRender = false;
     elements.cancelButton.focus({ preventScroll: true });
   }
+}
+
+function updateActionCountdown(run) {
+  const deadline = new Date(run.lifecycle?.action_deadline || "");
+  const remaining = Math.max(0, Math.ceil((deadline.valueOf() - Date.now()) / 1000));
+  if (!Number.isFinite(deadline.valueOf())) {
+    elements.actionCountdown.textContent = "Choose an Extended test or safely eject this drive.";
+    return;
+  }
+  const minutes = Math.floor(remaining / 60);
+  const seconds = String(remaining % 60).padStart(2, "0");
+  elements.actionCountdown.textContent = remaining
+    ? `Choose an action within ${minutes}:${seconds}. The drive ejects automatically when time runs out.`
+    : "The choice window has ended. Waiting for the station to eject the drive.";
+  const unavailable = remaining === 0 || choosingAction || chosenActionRunId === run.id;
+  elements.actionExtended.disabled = unavailable;
+  elements.actionEject.disabled = unavailable;
 }
 
 function renderDrives() {
@@ -549,7 +595,7 @@ function appendReportActions(run) {
     controls.append(reportActionButton("Reconnect / test again", "retest", run, retestRun, stationBusy));
     panel.append(
       textNode("p", "Reconnect the drive or power-cycle its USB dock, then choose this button again. Safe eject powers down and removes the device; mounting a filesystem does not reconnect it."),
-      textNode("p", "If automatic intake is enabled, DriveCheck may queue an Extended test as soon as the drive is rediscovered.", "report-action-note"),
+      textNode("p", "If automatic intake is enabled, DriveCheck may queue a Quick test as soon as the drive is rediscovered, then wait for an Extended or Eject choice.", "report-action-note"),
       controls
     );
   } else if (connected.eligible) {
@@ -737,19 +783,22 @@ function renderSettings(force = false) {
   if (!automationSaving) {
     elements.autoTest.checked = Boolean(settings.auto_test);
     elements.autoEject.checked = Boolean(settings.auto_eject);
+    elements.autoEjectDelay.value = String(settings.auto_eject_delay_seconds ?? 180);
   }
   elements.autoTest.disabled = Boolean(settings.headless) || automationSaving;
   elements.autoEject.disabled = Boolean(settings.headless) || automationSaving;
-  elements.automationNote.textContent = settings.headless ? "Headless mode: dock → read-only extended test → message → safe eject." : "Automatic intake only starts for unmounted external drives with a unique identity.";
+  elements.autoEjectDelay.disabled = automationSaving;
+  elements.automationNote.textContent = settings.headless ? "Headless mode: dock → Quick test → choice window → safe eject." : "Automatic intake only starts for unmounted external drives with a unique identity.";
   const managed = Boolean(settings.notifications_from_env);
   if (managed) elements.automationNote.textContent += " Notifications are managed by the station environment.";
   if (settingsDirty && !force) return;
-  [elements.notificationsEnabled, elements.provider, elements.discordWebhook, elements.telegramToken, elements.telegramChat, elements.notifyStarted, elements.notifyReady, elements.forgetDiscord, elements.forgetTelegram].forEach((field) => { field.disabled = managed; });
+  [elements.notificationsEnabled, elements.provider, elements.discordWebhook, elements.telegramToken, elements.telegramChat, elements.telegramUser, elements.notifyStarted, elements.notifyReady, elements.forgetDiscord, elements.forgetTelegram].forEach((field) => { field.disabled = managed; });
   elements.notificationsEnabled.checked = Boolean(notifications.enabled);
   elements.provider.value = notifications.provider || "none";
   elements.notifyStarted.checked = Boolean(notifications.notify_started);
   elements.notifyReady.checked = notifications.notify_ready !== false;
   elements.telegramChat.value = notifications.telegram_chat_id || "";
+  elements.telegramUser.value = notifications.telegram_user_id || "";
   elements.discordWebhook.value = "";
   elements.telegramToken.value = "";
   elements.discordConfigured.textContent = notifications.discord_configured ? "A webhook is saved." : "No webhook saved.";
@@ -766,6 +815,9 @@ function renderSettings(force = false) {
 function showProviderFields() {
   elements.discordFields.hidden = elements.provider.value !== "discord";
   elements.telegramFields.hidden = elements.provider.value !== "telegram";
+  elements.providerNote.textContent = elements.provider.value === "telegram"
+    ? "Telegram supports dashboard sign-in links and interactive test choices."
+    : (elements.provider.value === "discord" ? "Discord sends notifications and readable reports." : "Choose a provider to send updates.");
 }
 
 async function refreshState() {
@@ -816,10 +868,11 @@ $("#logout-button").addEventListener("click", async () => {
 });
 
 $("#scan-button").addEventListener("click", async (event) => {
-  event.currentTarget.disabled = true;
+  const button = event.currentTarget;
+  button.disabled = true;
   try { await api("/api/scan", { method: "POST" }); await refreshState(); toast("Drive scan complete."); }
   catch (error) { showError(error.message); toast(error.message, "error"); }
-  finally { event.currentTarget.disabled = false; }
+  finally { button.disabled = false; }
 });
 
 elements.cancelButton.addEventListener("click", async () => {
@@ -830,6 +883,30 @@ elements.cancelButton.addEventListener("click", async () => {
   catch (error) { showError(error.message); toast(error.message, "error"); }
   finally { elements.cancelButton.disabled = false; }
 });
+
+async function chooseWaitingAction(action) {
+  const run = awaitingActionRun();
+  if (!run || choosingAction) return;
+  choosingAction = true;
+  elements.actionExtended.disabled = true;
+  elements.actionEject.disabled = true;
+  try {
+    const result = await api(`/api/runs/${encodeURIComponent(run.id)}/action`, { method: "POST", body: { action } });
+    chosenActionRunId = run.id;
+    toast(result?.detail || (action === "extended" ? "Extended test requested." : "Safe eject requested."));
+    await refreshState();
+  } catch (error) {
+    showError(error.message);
+    toast(error.message, "error");
+  } finally {
+    choosingAction = false;
+    const waiting = awaitingActionRun();
+    if (waiting) updateActionCountdown(waiting);
+  }
+}
+
+elements.actionExtended.addEventListener("click", () => chooseWaitingAction("extended"));
+elements.actionEject.addEventListener("click", () => chooseWaitingAction("eject"));
 
 elements.verifyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -846,11 +923,10 @@ $("#verify-close").addEventListener("click", () => elements.verifyDialog.close()
 $("#verify-cancel").addEventListener("click", () => elements.verifyDialog.close());
 
 elements.settingsForm.addEventListener("input", (event) => {
-  if (event.target !== elements.autoTest && event.target !== elements.autoEject) settingsDirty = true;
+  if (![elements.autoTest, elements.autoEject, elements.autoEjectDelay].includes(event.target)) settingsDirty = true;
 });
 
-async function saveAutomation(field, key) {
-  const desired = field.checked;
+async function saveAutomation(field, key, desired = field.checked) {
   automationSaving = true;
   elements.automationStatus.textContent = "Saving automation settings…";
   renderSettings();
@@ -869,6 +945,10 @@ async function saveAutomation(field, key) {
 
 elements.autoTest.addEventListener("change", () => saveAutomation(elements.autoTest, "auto_test"));
 elements.autoEject.addEventListener("change", () => saveAutomation(elements.autoEject, "auto_eject"));
+elements.autoEjectDelay.addEventListener("change", () => {
+  if (!elements.autoEjectDelay.reportValidity()) return;
+  saveAutomation(elements.autoEjectDelay, "auto_eject_delay_seconds", Number(elements.autoEjectDelay.value));
+});
 elements.provider.addEventListener("change", showProviderFields);
 elements.settingsForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -880,6 +960,7 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     discord_webhook: elements.discordWebhook.value,
     telegram_token: elements.telegramToken.value,
     telegram_chat_id: elements.telegramChat.value,
+    telegram_user_id: elements.telegramUser.value,
     notify_started: elements.notifyStarted.checked,
     notify_ready: elements.notifyReady.checked
   };
@@ -892,11 +973,12 @@ elements.settingsForm.addEventListener("submit", async (event) => {
 });
 
 $("#test-notification").addEventListener("click", async (event) => {
-  event.currentTarget.disabled = true;
+  const button = event.currentTarget;
+  button.disabled = true;
   elements.settingsStatus.textContent = "Sending test message…";
   try { await api("/api/notifications/test", { method: "POST" }); elements.settingsStatus.textContent = "Test message sent."; toast("Test notification sent."); }
   catch (error) { elements.settingsStatus.textContent = error.message; toast(error.message, "error"); }
-  finally { event.currentTarget.disabled = false; }
+  finally { button.disabled = false; }
 });
 
 async function forgetCredentials(provider, button) {
@@ -926,7 +1008,31 @@ window.addEventListener("hashchange", syncDashboardView);
 
 $("#date-line").textContent = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" }).format(new Date());
 
-refreshState().then(connectEvents).catch((error) => {
-  if (!elements.loginView.hidden) elements.loginError.textContent = "Enter your station token to continue.";
-  else showError(error.message);
-});
+async function exchangeAccessLink(link) {
+  try {
+    const response = await fetch("/api/access", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ token: link.token })
+    });
+    if (!response.ok) throw new Error("This sign-in link has expired or was already used.");
+    const result = await response.json();
+    selectedRunId = result.run_id || link.runId || null;
+    await refreshState();
+    connectEvents();
+    if (selectedRunId) document.querySelector("#history").scrollIntoView();
+  } catch (error) {
+    showLogin();
+    elements.loginError.textContent = `${error.message} Enter the station access token to continue.`;
+  }
+}
+
+if (accessFragment) {
+  exchangeAccessLink(accessFragment);
+} else {
+  refreshState().then(connectEvents).catch((error) => {
+    if (!elements.loginView.hidden) elements.loginError.textContent = "Enter your station token to continue.";
+    else showError(error.message);
+  });
+}

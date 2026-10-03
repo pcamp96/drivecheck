@@ -106,6 +106,13 @@
             <li data-phase="smart_after">Final health</li>
           </ol>
           <p class="active-detail" id="active-detail"></p>
+          <div class="awaiting-action" id="awaiting-action" hidden>
+            <div><strong>Quick test complete</strong><p id="action-countdown" role="status"></p></div>
+            <div class="action-buttons">
+              <button type="button" id="action-extended">Run Extended test</button>
+              <button type="button" class="quiet-button" id="action-eject">Eject now</button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -138,8 +145,11 @@
         <form class="settings-grid" id="settings-form">
           <fieldset>
             <legend>Automation</legend>
-            <label class="switch-row" for="auto-test"><span><strong>Test new drives automatically</strong><small>Starts the safe extended profile when an eligible drive appears.</small></span><input type="checkbox" id="auto-test"><i aria-hidden="true"></i></label>
+            <label class="switch-row" for="auto-test"><span><strong>Test new drives automatically</strong><small>Starts a safe Quick test when an eligible drive appears, then waits for your choice.</small></span><input type="checkbox" id="auto-test"><i aria-hidden="true"></i></label>
             <label class="switch-row" for="auto-eject"><span><strong>Safely eject after testing</strong><small>Waits for the result message, then releases the drive. Headless mode requires this.</small></span><input type="checkbox" id="auto-eject"><i aria-hidden="true"></i></label>
+            <label for="auto-eject-delay">Choice window after a Quick test</label>
+            <div class="number-with-unit"><input id="auto-eject-delay" type="number" min="0" max="3600" step="1" inputmode="numeric"><span>seconds</span></div>
+            <p class="configured-note">The dashboard waits this long for Extended or Eject. The default is 180 seconds.</p>
             <p class="form-status" id="automation-status" role="status">Changes save automatically.</p>
             <p class="configured-note" id="automation-note"></p>
             <div class="read-only-settings"><span>Destructive verification</span><strong id="destructive-setting">Disabled</strong><span>Hardware access</span><strong id="hardware-setting">—</strong></div>
@@ -150,9 +160,10 @@
             <label for="notification-provider">Provider</label>
             <select id="notification-provider">
               <option value="none">None</option>
-              <option value="discord">Discord</option>
-              <option value="telegram">Telegram</option>
+              <option value="discord">Discord (notifications only)</option>
+              <option value="telegram">Telegram (interactive)</option>
             </select>
+            <p class="configured-note" id="provider-note"></p>
             <div id="discord-fields" hidden>
               <label for="discord-webhook">Discord webhook</label>
               <input id="discord-webhook" type="password" autocomplete="off" placeholder="Leave blank to keep the saved webhook">
@@ -166,6 +177,9 @@
               <button type="button" class="forget-button" id="forget-telegram" hidden>Forget saved Telegram credentials</button>
               <label for="telegram-chat">Telegram chat ID</label>
               <input id="telegram-chat" type="text" autocomplete="off">
+              <label for="telegram-user">Authorized Telegram user ID</label>
+              <input id="telegram-user" type="text" autocomplete="off">
+              <p class="configured-note">Required for interactive commands in group chats. Only this sender can choose actions.</p>
             </div>
             <label class="check-row" for="notify-ready"><input type="checkbox" id="notify-ready"> Notify when the station is ready after startup</label>
             <label class="check-row" for="notify-started"><input type="checkbox" id="notify-started"> Notify when a test starts</label>

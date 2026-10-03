@@ -110,8 +110,10 @@ sudo journalctl -u drivecheck -f
 ```
 
 No browser, monitor, or keyboard is needed afterward. Dock an eligible, unmounted
-USB drive: the service runs Extended read-only checks, saves the report, queues
-the result message, waits up to 30 seconds for delivery, then safely powers off
+USB drive: the service runs Quick read-only checks, saves the report, and sends
+the result message. It holds a passed/warning drive for 180 seconds so you can
+choose **Run Extended** or **Eject now** in Telegram or the dashboard. With no
+choice, it safely powers off
 the drive through UDisks. A second message says **ready to remove** only after
 release is confirmed. The dashboard remains available for observation.
 Headless mode requires tools, raw I/O permissions, and a valid enabled provider
@@ -120,7 +122,7 @@ Keep desktop automount disabled on this dedicated Pi. Mounted drives remain
 blocked; the unattended station never automatically unmounts your filesystems.
 
 If the network is down, the report and message stay queued; eject still proceeds
-after the bounded delivery wait. Notification and eject outcomes are recorded
+after the bounded action/delivery wait. Notification and eject outcomes are recorded
 separately from the test verdict. Failed or unsupported eject never produces a
 ready-to-remove confirmation. Cancellation does not automatically eject. An
 interrupted post-test release is recorded and never blindly resumed on restart.
@@ -135,6 +137,39 @@ an isolated device. Physically verify the dock's behavior before relying on it.
 Environment-managed provider settings are read-only in the dashboard. Without
 provider environment variables, stored dashboard settings remain configurable.
 
+
+## Telegram controls and dashboard links
+
+Telegram is the primary remote interface; Discord remains notification-only.
+Use a dedicated Telegram bot for each station. The station receives button presses
+through outbound long polling, so it does not require an inbound public endpoint.
+An existing bot webhook must be removed deliberately before long polling can work;
+DriveCheck reports that conflict and does not alter another application's webhook.
+
+For a private numeric chat ID, only the user with that same numeric ID can control
+tests. In groups, configure **Authorized Telegram user ID** (or
+`DRIVECHECK_TELEGRAM_USER_ID`) in addition to the chat ID. Both chat and sender must
+match. Channel usernames can receive notices but cannot authorize test controls.
+Buttons only apply to the current connected drive during its action window; expired,
+replayed, missing, mounted, or replaced drive actions are rejected. Writes cannot
+be started from Telegram buttons. Use the dashboard's separately enabled and
+serial-confirmed write verification flow when deliberately erasing a drive.
+
+In groups/channels, the dashboard link requires the normal station login; sign-in
+grants are sent only to the authorized private numeric chat.
+Set `DRIVECHECK_PUBLIC_ORIGIN` to the station URL reachable from your phone, such
+as your Tailscale address. Private Telegram messages then include **Open dashboard** with
+a one-use sign-in link valid for ten minutes. Anyone receiving that link can sign
+in until it is used or expires, so use a private trusted chat. The link uses a
+short-lived grant, never the persistent station token; link previews do not redeem
+it. Opening the dashboard does not pause the eject timer. Restarting the station
+invalidates outstanding links and action buttons. The dashboard URL still needs
+to be reachable from the phone (for example, connected to your tailnet).
+
+After safe power-off, reconnect or cycle the dock's power before another test.
+Filesystem mounting cannot bring an ejected USB device back online. Quick is only
+a brief health screen and read sample; it does not establish full-surface health.
+
 ## Profiles and automatic intake
 
 | Profile | Checks | Drive writes |
@@ -144,7 +179,10 @@ provider environment variables, stored dashboard settings remain configurable.
 | Write verification | Extended self-test, read benchmark, full-drive write and checksum readback, SMART before/after | **Entire selected drive overwritten** |
 
 Choose a drive on the dashboard and start Quick or Extended. Enable automatic
-intake in Settings to queue **Extended, read-only** checks on eligible drives.
+intake in Settings to queue **Quick, read-only** checks on eligible drives.
+The automatic eject delay defaults to 180 seconds; set it to zero for immediate
+eject. Failed or incomplete tests skip the action window. Manually requested
+Extended tests eject on completion when automatic eject is enabled.
 Each drive is attempted once per observed connection. On service restart,
 already-recorded drives aren't automatically retested; run a manual test or
 unplug/reconnect to retry. Unplugging and reconnecting between discovery polls

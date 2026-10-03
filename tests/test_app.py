@@ -1,6 +1,8 @@
 import json
 import sqlite3
 import time
+from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi.testclient import TestClient
 
@@ -49,6 +51,49 @@ def test_auth_secret_redaction_and_csrf(tmp_path):
         assert TOKEN not in client.get("/api/state").text
         client.post("/api/logout", headers={"Origin": "http://testserver"})
         assert client.get("/api/state").status_code == 401
+
+
+def test_one_time_access_link_creates_session_without_leaking_token(tmp_path):
+    application = app(tmp_path, public_origin="https://station.example")
+    with TestClient(application) as client:
+        url = application.state.engine.access_links.issue("run-123")
+        token = parse_qs(urlsplit(url).fragment)["access"][0]
+        # Link previews only fetch the page and cannot consume the fragment token.
+        assert client.get("/").status_code == 200
+        response = client.post("/api/access", json={"token": token})
+        assert response.status_code == 200
+        assert response.json() == {"ok": True, "run_id": "run-123"}
+        assert token not in response.text
+        assert "HttpOnly" in response.headers["set-cookie"]
+        assert client.get("/api/state").status_code == 200
+        reused = client.post(
+            "/api/access", json={"token": token}, headers={"Origin": "https://station.example"}
+        )
+        assert reused.status_code == 401
+        assert token not in reused.text
+
+
+def test_waiting_run_action_is_authenticated_validated_and_conflicts_are_safe(tmp_path):
+    application = app(tmp_path)
+    with TestClient(application) as client:
+        path = "/api/runs/run-123/action"
+        assert client.post(path, json={"action": "extended"}).status_code == 401
+        assert client.post(path, headers=AUTH, json={"action": "erase"}).status_code == 422
+
+        application.state.engine.choose_action = AsyncMock(
+            return_value={"status": "accepted", "detail": "Extended test requested."}
+        )
+        response = client.post(path, headers=AUTH, json={"action": "extended"})
+        assert response.status_code == 200
+        assert response.json()["status"] == "accepted"
+        application.state.engine.choose_action.assert_awaited_once_with("run-123", "extended")
+
+        application.state.engine.choose_action = AsyncMock(
+            side_effect=ValueError("The choice window has ended")
+        )
+        response = client.post(path, headers=AUTH, json={"action": "eject"})
+        assert response.status_code == 409
+        assert response.json()["detail"] == "The choice window has ended"
 
 
 def test_demo_full_run_report_and_history_survive_restart(tmp_path):
@@ -209,7 +254,7 @@ def test_auto_read_only_and_login_throttle(tmp_path):
         client.post("/api/scan", headers=AUTH)
         state = client.get("/api/state", headers=AUTH).json()
         assert len(state["runs"]) == 1
-        assert state["runs"][0]["profile"] == "extended"
+        assert state["runs"][0]["profile"] == "quick"
         wait_finished(client, state["runs"][0]["id"])
         client.post("/api/scan", headers=AUTH)
         assert len(client.get("/api/state", headers=AUTH).json()["runs"]) == 1

@@ -6,17 +6,18 @@ Never probes real devices or calls messaging providers.
 """
 
 import json
-import os
 import socket
-import subprocess
-import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 import httpx
+import uvicorn
 from playwright.sync_api import expect, sync_playwright
 
+from drivecheck.app import create_app
+from drivecheck.config import Config
 from drivecheck.storage import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,9 +80,7 @@ def failed_report_fixture(drive: dict) -> dict:
                 "detail": "Completed: read failure",
                 "raw": {
                     "smart_status": {"passed": True},
-                    "ata_smart_self_test_log": {
-                        "standard": {"table": [current, historical]}
-                    },
+                    "ata_smart_self_test_log": {"standard": {"table": [current, historical]}},
                 },
             },
         },
@@ -102,20 +101,21 @@ def main():
         port = listener.getsockname()[1]
     base = f"http://127.0.0.1:{port}"
     with tempfile.TemporaryDirectory(prefix="drivecheck-browser-") as temp:
-        env = {
-            **os.environ,
-            "DRIVECHECK_API_KEY": TOKEN,
-            "DRIVECHECK_DEMO": "true",
-            "DRIVECHECK_ALLOW_DESTRUCTIVE": "true",
-            "DRIVECHECK_DEMO_STEP_SECONDS": "0.15",
-        }
-        process = subprocess.Popen(
-            [sys.executable, "-m", "drivecheck", "--demo", "--data-dir", temp, "--port", str(port)],
-            cwd=ROOT,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        application = create_app(
+            Config(
+                data_dir=Path(temp),
+                api_key=TOKEN,
+                public_origin=base,
+                demo=True,
+                allow_destructive=True,
+                demo_step_seconds=0.15,
+            )
         )
+        server = uvicorn.Server(
+            uvicorn.Config(application, host="127.0.0.1", port=port, log_level="error")
+        )
+        server_thread = threading.Thread(target=server.run, daemon=True)
+        server_thread.start()
         try:
             for _ in range(100):
                 try:
@@ -123,7 +123,7 @@ def main():
                         break
                 except httpx.HTTPError:
                     pass
-                if process.poll() is not None:
+                if not server_thread.is_alive():
                     raise RuntimeError("Preview exited before startup")
                 time.sleep(0.05)
             else:
@@ -134,8 +134,28 @@ def main():
             store = Store(Path(temp) / "drivecheck.sqlite3")
             store.save(failed_report_fixture(state["drives"][0]))
             store.close()
+            access_link = application.state.engine.access_links.issue("browser-failed-report")
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch()
+                link_context = browser.new_context(viewport={"width": 1100, "height": 800})
+                link_page = link_context.new_page()
+                link_page.goto(access_link)
+                expect(link_page.locator("#app-view")).to_be_visible()
+                expect(link_page.locator("#report")).to_contain_text("Completed: read failure")
+                assert link_page.url == base + "/"
+                assert "access=" not in link_page.url
+                link_page.locator("#logout-button").click()
+                expect(link_page.locator("#login-view")).to_be_visible()
+                link_context.close()
+                reused_context = browser.new_context(viewport={"width": 1100, "height": 800})
+                reused_page = reused_context.new_page()
+                reused_page.goto(access_link)
+                expect(reused_page.locator("#login-error")).to_contain_text(
+                    "expired or was already used"
+                )
+                assert reused_page.url == base + "/"
+                reused_context.close()
+
                 context = browser.new_context(viewport={"width": 1440, "height": 1100})
                 page = context.new_page()
                 errors = []
@@ -155,9 +175,13 @@ def main():
                     "SMART’s overall check passes now, but recorded errors need attention"
                 )
                 expect(page.locator("#report")).to_contain_text("Recorded self-test history")
-                expect(page.locator("#report")).to_contain_text("Short offline — Completed: read failure")
+                expect(page.locator("#report")).to_contain_text(
+                    "Short offline — Completed: read failure"
+                )
                 expect(page.locator("#report")).to_contain_text("Failure location: LBA 604,616")
-                expect(page.locator("#report")).to_contain_text("This self-test found a drive error")
+                expect(page.locator("#report")).to_contain_text(
+                    "This self-test found a drive error"
+                )
                 expect(page.locator("#report")).to_contain_text(
                     "The drive could not read part of its surface"
                 )
@@ -227,7 +251,10 @@ def main():
                 expect(page.locator("#settings")).to_be_visible()
                 expect(page.locator("#dashboard-view")).to_be_hidden()
                 setting_cards = page.locator("#settings-form fieldset")
-                assert setting_cards.nth(1).bounding_box()["y"] > setting_cards.nth(0).bounding_box()["y"]
+                assert (
+                    setting_cards.nth(1).bounding_box()["y"]
+                    > setting_cards.nth(0).bounding_box()["y"]
+                )
                 page.screenshot(path=str(ARTIFACTS / "settings-desktop.png"), full_page=True)
                 page.locator("#notification-provider").select_option("discord")
                 page.locator("#discord-webhook").fill(
@@ -241,6 +268,7 @@ def main():
                 page.locator("#notification-provider").select_option("telegram")
                 page.locator("#telegram-token").fill("123:synthetic_secret")
                 page.locator("#telegram-chat").fill("-987")
+                page.locator("#telegram-user").fill("123456")
                 page.get_by_role("button", name="Save notification settings", exact=True).click()
                 expect(page.locator("#telegram-configured")).to_have_text(
                     "Telegram credentials saved"
@@ -252,6 +280,7 @@ def main():
                 expect(page.locator("#telegram-token")).to_have_attribute(
                     "placeholder", "Token saved · leave blank to keep it"
                 )
+                expect(page.locator("#telegram-user")).to_have_value("123456")
                 page.reload()
                 expect(page.locator("#telegram-configured")).to_have_text(
                     "Telegram credentials saved"
@@ -267,6 +296,16 @@ def main():
                     "notifications"
                 ]
                 page.locator("#telegram-token").fill("999:unsaved_notification_draft")
+                page.locator("#auto-eject-delay").fill("181")
+                page.locator("#auto-eject-delay").press("Tab")
+                expect(page.locator("#automation-status")).to_have_text(
+                    "Automation settings saved."
+                )
+                page.locator("#auto-eject-delay").fill("180")
+                page.locator("#auto-eject-delay").press("Tab")
+                expect(page.locator("#automation-status")).to_have_text(
+                    "Automation settings saved."
+                )
                 page.locator('label[for="auto-eject"]').click()
                 expect(page.locator("#automation-status")).to_have_text(
                     "Automation settings saved."
@@ -290,6 +329,23 @@ def main():
                 expect(page.locator("#auto-test")).to_be_checked()
                 saved = json.loads((Path(temp) / "settings.json").read_text())
                 assert saved["auto_test"] and saved["auto_eject"]
+                assert saved["auto_eject_delay_seconds"] == 180
+
+                # Automatic intake performs Quick first, then offers the same timed
+                # Extended/Eject choice shown in Telegram.
+                application.state.engine.auto_attempted.clear()
+                page.get_by_role("link", name="Workbench", exact=True).click()
+                page.locator("#scan-button").click()
+                expect(page.locator("#awaiting-action")).to_be_visible(timeout=15000)
+                expect(page.locator("#action-countdown")).to_contain_text("ejects automatically")
+                expect(page.get_by_role("button", name="Run Extended test")).to_be_visible()
+                expect(page.get_by_role("button", name="Eject now")).to_be_visible()
+                page.get_by_role("button", name="Run Extended test").click()
+                expect(page.get_by_role("button", name="Run Extended test")).to_be_disabled()
+                expect(page.locator("#awaiting-action")).to_be_hidden(timeout=15000)
+                expect(page.locator("#run-list")).to_contain_text("Extended", timeout=15000)
+
+                page.get_by_role("link", name="Settings", exact=True).click()
                 page.locator('label[for="auto-test"]').click()
                 expect(page.locator("#auto-test")).to_be_enabled()
                 page.locator('label[for="auto-eject"]').click()
@@ -320,15 +376,11 @@ def main():
                 assert not errors, errors
                 browser.close()
             print(
-                "Browser verification passed: login, SSE, readable failed SMART/self-test evidence, reconnect/retest actions, report export, cancellation, erase confirmation, dedicated settings, secret clearing, mobile, logout."
+                "Browser verification passed: one-time access links, login, SSE, Quick choice countdown/actions, readable failed SMART/self-test evidence, report export, dedicated settings, mobile, logout."
             )
         finally:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+            server.should_exit = True
+            server_thread.join(timeout=10)
 
 
 if __name__ == "__main__":

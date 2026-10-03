@@ -32,6 +32,10 @@ class Login(Input):
     token: str = Field(max_length=512)
 
 
+class AccessInput(Input):
+    token: str = Field(max_length=512)
+
+
 class RunInput(Input):
     drive_id: str = Field(max_length=200)
     profile: Literal["quick", "extended", "verify"] = "extended"
@@ -44,6 +48,7 @@ class NotificationInput(Input):
     discord_webhook: str | None = Field(default=None, max_length=512)
     telegram_token: str | None = Field(default=None, max_length=256)
     telegram_chat_id: str | None = Field(default=None, max_length=100)
+    telegram_user_id: str | None = Field(default=None, max_length=100)
     notify_started: bool | None = None
     notify_ready: bool | None = None
     clear_discord: bool | None = None
@@ -53,7 +58,12 @@ class NotificationInput(Input):
 class SettingsInput(Input):
     auto_test: bool | None = None
     auto_eject: bool | None = None
+    auto_eject_delay_seconds: int | None = Field(default=None, ge=0, le=3600)
     notifications: NotificationInput | None = None
+
+
+class ActionInput(Input):
+    action: Literal["extended", "eject"]
 
 
 def create_app(config: Config | None = None, hardware=None) -> FastAPI:
@@ -152,6 +162,27 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
     def engine() -> Engine:
         return app.state.engine
 
+    def session_response(content: dict) -> JSONResponse:
+        timestamp = time.time()
+        for key, expiry in list(sessions.items()):
+            if expiry <= timestamp:
+                sessions.pop(key, None)
+        if len(sessions) >= 100:
+            sessions.pop(next(iter(sessions)))
+        session = secrets.token_urlsafe(32)
+        sessions[session] = timestamp + 12 * 3600
+        response = JSONResponse(content)
+        response.set_cookie(
+            "drivecheck_session",
+            session,
+            max_age=12 * 3600,
+            httponly=True,
+            secure=config.secure_cookie,
+            samesite="strict",
+            path="/api",
+        )
+        return response
+
     @app.get("/api/health")
     async def health():
         return {"status": "ok", "mode": "demo" if config.demo else "hardware", "version": "0.1.0"}
@@ -171,24 +202,14 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
             failures.append(timestamp)
             raise HTTPException(401, "Incorrect station access token")
         attempts.pop(address, None)
-        for key, expiry in list(sessions.items()):
-            if expiry <= timestamp:
-                sessions.pop(key, None)
-        if len(sessions) >= 100:
-            sessions.pop(next(iter(sessions)))
-        session = secrets.token_urlsafe(32)
-        sessions[session] = timestamp + 12 * 3600
-        response = JSONResponse({"ok": True})
-        response.set_cookie(
-            "drivecheck_session",
-            session,
-            max_age=12 * 3600,
-            httponly=True,
-            secure=config.secure_cookie,
-            samesite="strict",
-            path="/api",
-        )
-        return response
+        return session_response({"ok": True})
+
+    @app.post("/api/access")
+    async def access(body: AccessInput):
+        run_id = engine().access_links.redeem(body.token)
+        if run_id is None:
+            raise HTTPException(401, "This sign-in link has expired or was already used")
+        return session_response({"ok": True, "run_id": run_id})
 
     @app.post("/api/logout", dependencies=[Depends(authenticated)])
     async def logout(request: Request):
@@ -263,6 +284,13 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
     async def retest_run(run_id: str):
         try:
             return await engine().retest(run_id)
+        except (ValueError, SafetyError) as error:
+            raise HTTPException(409, str(error)) from None
+
+    @app.post("/api/runs/{run_id}/action", dependencies=[Depends(authenticated)])
+    async def choose_run_action(run_id: str, body: ActionInput):
+        try:
+            return await engine().choose_action(run_id, body.action)
         except (ValueError, SafetyError) as error:
             raise HTTPException(409, str(error)) from None
 
