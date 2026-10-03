@@ -103,7 +103,7 @@ async def test_headless_delivers_then_unmounts_ejects_and_sends_ready(tmp_path, 
         }
         assert hardware.unmount_calls == 0
         assert hardware.eject_calls == 1
-        assert "Safe eject pending" in delivered[0]
+        assert any("Safe eject pending" in message for message in delivered)
         for _ in range(20):
             if any("ready to remove" in message for message in delivered):
                 break

@@ -99,3 +99,39 @@ def run_message(run: dict, demo: bool = False) -> str:
         lines.append("Safe eject was not confirmed. Check the station before removal.")
     lines.append(f"Run: {run['id']}")
     return "\n".join(lines)
+
+
+def station_ready_message(
+    *,
+    booted_at: str,
+    platform: str,
+    mode: str,
+    capabilities: dict,
+    queued: int,
+) -> str:
+    """Describe station readiness without overstating unavailable hardware features."""
+    lines = [
+        "DriveCheck station ready",
+        f"Started: {booted_at}",
+        f"Mode: {mode} | Platform: {platform}",
+        "Software: ready.",
+    ]
+    if mode == "demo":
+        lines.append("Testing: simulation ready; host drives are not accessed.")
+    elif capabilities.get("can_test"):
+        lines.append("Testing: read-only drive intake is available.")
+    else:
+        lines.append("Testing: inventory is available; drive tests are unavailable.")
+    lines.append(
+        "Safe eject: available."
+        if capabilities.get("can_eject")
+        else "Safe eject: unavailable on this station."
+    )
+    lines.append(f"Queue: {queued} intake job{'s' if queued != 1 else ''} queued.")
+    limitations = [
+        str(item).strip() for item in capabilities.get("limitations", []) if str(item).strip()
+    ]
+    if limitations:
+        summary = "; ".join(limitations[:3])
+        lines.append(f"Limitations: {summary[:600]}")
+    return "\n".join(lines)

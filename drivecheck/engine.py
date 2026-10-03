@@ -65,6 +65,10 @@ class Engine:
         self.initial_scan = True
         self.tools = {name: bool(shutil.which(name)) for name in ("lsblk", "smartctl", "fio")}
         self.capabilities = self._hardware_capabilities()
+        self.boot_id = uuid.uuid4().hex
+        self.booted_at: str | None = None
+        self.startup_notice_id = f"startup:ready:{self.boot_id}"
+        self._startup_notice_queued = False
         if getattr(config, "headless", False):
             # Headless is an appliance workflow. Its two required behaviors are
             # runtime invariants rather than dashboard preferences.
@@ -72,6 +76,8 @@ class Engine:
             self.settings.value["auto_eject"] = True
 
     async def start(self):
+        self.booted_at = now()
+        self.store.discard_pending_startup_notices()
         self.store.recover()
         self._validate_headless_startup()
         await self.scan()
@@ -80,6 +86,8 @@ class Engine:
             asyncio.create_task(self.supervise("discovery", self.monitor)),
             asyncio.create_task(self.supervise("notifications", self.notifier)),
         ]
+        if self.discovery_error is None:
+            self._queue_startup_ready_notice()
 
     async def stop(self):
         for task in self.tasks:
@@ -190,6 +198,32 @@ class Engine:
                 with contextlib.suppress(asyncio.QueueEmpty):
                     queue.get_nowait()
             queue.put_nowait(True)
+
+    def _queue_startup_ready_notice(self) -> None:
+        if self._startup_notice_queued:
+            return
+        settings = self.settings.value.get("notifications", {})
+        if not settings.get("notify_ready", True):
+            return
+        if not settings.get("enabled") or settings.get("provider") == "none":
+            return
+        try:
+            notifications.validate_settings(settings)
+        except (KeyError, TypeError, ValueError):
+            self.notification_error = (
+                "Startup notification was not queued because notification settings are incomplete."
+            )
+            return
+        message = notifications.station_ready_message(
+            booted_at=self.booted_at or now(),
+            platform=self.capabilities.get("platform", "unknown"),
+            mode="demo" if self.config.demo else "hardware",
+            capabilities=self.capabilities,
+            queued=self.queue.qsize(),
+        )
+        self.store.enqueue_notice(self.startup_notice_id, message)
+        self._startup_notice_queued = True
+        self.notice_event.set()
 
     async def scan(self):
         async with self.scan_lock:

@@ -74,6 +74,11 @@ class Store:
         )
         self.db.commit()
 
+    def discard_pending_startup_notices(self) -> None:
+        """Remove boot notices that would describe a previous process as newly ready."""
+        self.db.execute("DELETE FROM outbox WHERE id LIKE 'startup:ready:%' AND delivered=0")
+        self.db.commit()
+
     def pending_notices(self, timestamp: float) -> list[tuple]:
         return self.db.execute(
             "SELECT id,message,attempts FROM outbox WHERE delivered=0 AND attempts<6 AND due<=? LIMIT 10",
