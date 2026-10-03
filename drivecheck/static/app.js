@@ -186,10 +186,18 @@ function renderActive() {
   elements.progressBar.style.width = `${progress}%`;
   elements.activeDetail.textContent = run.detail || phaseLabel(run.phase);
   elements.cancelButton.dataset.runId = run.id;
-  const currentIndex = phaseOrder.indexOf(run.phase);
-  elements.phaseTrack.querySelectorAll("li").forEach((item, index) => {
-    item.classList.toggle("current", index === currentIndex);
-    item.classList.toggle("done", currentIndex > index || progress === 100);
+  const runPhases = run.profile === "quick"
+    ? ["smart_before", "benchmark", "smart_after"]
+    : phaseOrder;
+  const currentIndex = runPhases.indexOf(run.phase);
+  elements.phaseTrack.querySelectorAll("li").forEach((item) => {
+    const phase = item.dataset.phase;
+    const index = runPhases.indexOf(phase);
+    const skipped = index === -1;
+    item.classList.toggle("skipped", skipped);
+    item.classList.toggle("current", !skipped && phase === run.phase);
+    item.classList.toggle("done", !skipped && (currentIndex > index || (progress === 100 && run.results?.[phase])));
+    item.title = skipped ? "Not included in the quick profile" : "";
   });
 }
 

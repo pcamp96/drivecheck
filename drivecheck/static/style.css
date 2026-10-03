@@ -144,6 +144,8 @@ main > section { max-width: 1350px; margin: 0 auto 58px; scroll-margin-top: 28px
 .phase-track li.done::before { background: #54a998; }
 .phase-track li.current { color: white; border-color: #79a2f4; font-weight: 650; }
 .phase-track li.current::before { background: #79a2f4; box-shadow: 0 0 0 4px rgba(121,162,244,.2); }
+.phase-track li.skipped { color: #70849b; border-color: #415773; text-decoration: line-through; }
+.phase-track li.skipped::before { background: #415773; }
 .active-detail { min-height: 1.5em; margin: 18px 0 0; color: #c4d1df; }
 
 .drive-list { display: grid; gap: 10px; }
