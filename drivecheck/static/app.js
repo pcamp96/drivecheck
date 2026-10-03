@@ -11,7 +11,7 @@ const elements = {
   activePercent: $("#active-percent"), progressBar: $("#progress-bar"), activeDetail: $("#active-detail"),
   phaseTrack: $("#phase-track"), cancelButton: $("#cancel-button"), runList: $("#run-list"),
   report: $("#report"), settingsForm: $("#settings-form"), autoTest: $("#auto-test"),
-  autoEject: $("#auto-eject"), automationNote: $("#automation-note"), platformNotice: $("#platform-notice"),
+  autoEject: $("#auto-eject"), automationNote: $("#automation-note"), automationStatus: $("#automation-status"), platformNotice: $("#platform-notice"),
   notificationsEnabled: $("#notifications-enabled"), provider: $("#notification-provider"),
   discordFields: $("#discord-fields"), discordWebhook: $("#discord-webhook"),
   discordConfigured: $("#discord-configured"), forgetDiscord: $("#forget-discord"),
@@ -31,6 +31,7 @@ let events = null;
 let selectedRunId = null;
 let verifyDrive = null;
 let settingsDirty = false;
+let automationSaving = false;
 let reconnectTimer = null;
 let driveRenderSignature = null;
 let focusActiveRunOnRender = false;
@@ -426,17 +427,19 @@ function renderReport(run) {
 }
 
 function renderSettings(force = false) {
-  if (settingsDirty && !force) return;
   const settings = snapshot.settings || {};
   const notifications = settings.notifications || {};
-  elements.autoTest.checked = Boolean(settings.auto_test);
-  elements.autoEject.checked = Boolean(settings.auto_eject);
-  elements.autoTest.disabled = Boolean(settings.headless);
-  elements.autoEject.disabled = Boolean(settings.headless);
+  if (!automationSaving) {
+    elements.autoTest.checked = Boolean(settings.auto_test);
+    elements.autoEject.checked = Boolean(settings.auto_eject);
+  }
+  elements.autoTest.disabled = Boolean(settings.headless) || automationSaving;
+  elements.autoEject.disabled = Boolean(settings.headless) || automationSaving;
   elements.automationNote.textContent = settings.headless ? "Headless mode: dock → read-only extended test → message → safe eject." : "Automatic intake only starts for unmounted external drives with a unique identity.";
   const managed = Boolean(settings.notifications_from_env);
-  [elements.notificationsEnabled, elements.provider, elements.discordWebhook, elements.telegramToken, elements.telegramChat, elements.notifyStarted, elements.notifyReady, elements.forgetDiscord, elements.forgetTelegram].forEach((field) => { field.disabled = managed; });
   if (managed) elements.automationNote.textContent += " Notifications are managed by the station environment.";
+  if (settingsDirty && !force) return;
+  [elements.notificationsEnabled, elements.provider, elements.discordWebhook, elements.telegramToken, elements.telegramChat, elements.notifyStarted, elements.notifyReady, elements.forgetDiscord, elements.forgetTelegram].forEach((field) => { field.disabled = managed; });
   elements.notificationsEnabled.checked = Boolean(notifications.enabled);
   elements.provider.value = notifications.provider || "none";
   elements.notifyStarted.checked = Boolean(notifications.notify_started);
@@ -537,7 +540,30 @@ elements.verifyForm.addEventListener("submit", async (event) => {
 $("#verify-close").addEventListener("click", () => elements.verifyDialog.close());
 $("#verify-cancel").addEventListener("click", () => elements.verifyDialog.close());
 
-elements.settingsForm.addEventListener("input", () => { settingsDirty = true; });
+elements.settingsForm.addEventListener("input", (event) => {
+  if (event.target !== elements.autoTest && event.target !== elements.autoEject) settingsDirty = true;
+});
+
+async function saveAutomation(field, key) {
+  const desired = field.checked;
+  automationSaving = true;
+  elements.automationStatus.textContent = "Saving automation settings…";
+  renderSettings();
+  try {
+    const saved = await api("/api/settings", { method: "PUT", body: { [key]: desired } });
+    snapshot.settings[key] = saved[key];
+    elements.automationStatus.textContent = "Automation settings saved.";
+  } catch (error) {
+    elements.automationStatus.textContent = `Could not save: ${error.message}`;
+    toast(error.message, "error");
+  } finally {
+    automationSaving = false;
+    renderSettings();
+  }
+}
+
+elements.autoTest.addEventListener("change", () => saveAutomation(elements.autoTest, "auto_test"));
+elements.autoEject.addEventListener("change", () => saveAutomation(elements.autoEject, "auto_eject"));
 elements.provider.addEventListener("change", showProviderFields);
 elements.settingsForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -553,7 +579,7 @@ elements.settingsForm.addEventListener("submit", async (event) => {
     notify_ready: elements.notifyReady.checked
   };
   try {
-    await api("/api/settings", { method: "PUT", body: { auto_test: elements.autoTest.checked, auto_eject: elements.autoEject.checked, ...(snapshot.settings?.notifications_from_env ? {} : { notifications: notificationSettings }) } });
+    await api("/api/settings", { method: "PUT", body: { ...(snapshot.settings?.notifications_from_env ? {} : { notifications: notificationSettings }) } });
     settingsDirty = false; elements.settingsStatus.textContent = "Settings saved.";
     await refreshState(); renderSettings(true); toast("Settings saved.");
   } catch (error) { elements.settingsStatus.textContent = error.message; toast(error.message, "error"); }

@@ -132,6 +132,53 @@ def main():
                 )
                 expect(page.locator("#telegram-configured")).to_have_class("credential-status")
 
+                # Automation switches persist immediately, independently of notification drafts.
+                notifications_before = context.request.get(f"{base}/api/state").json()["settings"][
+                    "notifications"
+                ]
+                page.locator("#telegram-token").fill("999:unsaved_notification_draft")
+                page.locator('label[for="auto-eject"]').click()
+                expect(page.locator("#automation-status")).to_have_text(
+                    "Automation settings saved."
+                )
+                expect(second.locator("#auto-eject")).to_be_checked()
+                expect(page.locator("#telegram-token")).to_have_value(
+                    "999:unsaved_notification_draft"
+                )
+                assert (
+                    context.request.get(f"{base}/api/state").json()["settings"]["notifications"]
+                    == notifications_before
+                )
+                page.reload()
+                expect(page.locator("#auto-eject")).to_be_checked()
+                page.locator('label[for="auto-test"]').click()
+                expect(page.locator("#automation-status")).to_have_text(
+                    "Automation settings saved."
+                )
+                expect(second.locator("#auto-test")).to_be_checked()
+                page.reload()
+                expect(page.locator("#auto-test")).to_be_checked()
+                saved = json.loads((Path(temp) / "settings.json").read_text())
+                assert saved["auto_test"] and saved["auto_eject"]
+                page.locator('label[for="auto-test"]').click()
+                expect(page.locator("#auto-test")).to_be_enabled()
+                page.locator('label[for="auto-eject"]').click()
+                expect(page.locator("#auto-eject")).to_be_enabled()
+
+                # Failed saves visibly roll back instead of pretending the switch persisted.
+                page.route(
+                    "**/api/settings",
+                    lambda route: route.fulfill(
+                        status=503, json={"detail": "Synthetic save failure"}
+                    ),
+                )
+                page.locator('label[for="auto-eject"]').click()
+                expect(page.locator("#automation-status")).to_contain_text(
+                    "Could not save: Synthetic save failure"
+                )
+                expect(page.locator("#auto-eject")).not_to_be_checked()
+                page.unroute("**/api/settings")
+
                 # Reconnect establishes a fresh snapshot; mobile has no horizontal overflow.
                 page.reload()
                 expect(page.locator("#stream-state")).to_contain_text("Live updates connected")
