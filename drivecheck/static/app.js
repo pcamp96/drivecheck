@@ -9,6 +9,10 @@ const elements = {
   drivesEmpty: $("#drives-empty"), activeEmpty: $("#active-empty"), activeContent: $("#active-content"),
   activeSubtitle: $("#active-subtitle"), activeDrive: $("#active-drive"), activeSerial: $("#active-serial"),
   activePercent: $("#active-percent"), progressBar: $("#progress-bar"), activeDetail: $("#active-detail"),
+  taskStatus: $("#task-status"), taskLabel: $("#task-label"), taskPercent: $("#task-percent"),
+  taskProgressTrack: $("#task-progress-track"), taskProgressBar: $("#task-progress-bar"),
+  taskDetail: $("#task-detail"), taskElapsed: $("#task-elapsed"), taskRemaining: $("#task-remaining"),
+  runRemaining: $("#run-remaining"), runEta: $("#run-eta"), taskWarning: $("#task-warning"),
   phaseTrack: $("#phase-track"), cancelButton: $("#cancel-button"), runList: $("#run-list"),
   awaitingAction: $("#awaiting-action"), actionCountdown: $("#action-countdown"),
   actionExtended: $("#action-extended"), actionEject: $("#action-eject"),
@@ -34,6 +38,11 @@ const elements = {
   eraseDrive: $("#erase-drive"), eraseMethod: $("#erase-method"), eraseDeadline: $("#erase-deadline"),
   erasePhrase: $("#erase-phrase"), eraseConfirmation: $("#erase-confirmation"),
   eraseError: $("#erase-error"), eraseSubmit: $("#erase-submit"),
+  estimateDialog: $("#estimate-dialog"), estimateForm: $("#estimate-form"),
+  estimateDrive: $("#estimate-drive"), estimateSummary: $("#estimate-summary"),
+  estimateDuration: $("#estimate-duration"), estimateFinish: $("#estimate-finish"),
+  estimateBreakdown: $("#estimate-breakdown"), estimateNotes: $("#estimate-notes"),
+  estimateError: $("#estimate-error"), estimateSubmit: $("#estimate-submit"),
   dashboardView: $("#dashboard-view"), settingsView: $("#settings"), pageTitle: $("#page-title")
 };
 
@@ -44,6 +53,8 @@ let verifyDrive = null;
 let takeControlDrive = null;
 let eraseRequest = null;
 let eraseDeadlineTimer = null;
+let estimateRequest = null;
+let activeTimingTimer = null;
 let settingsDirty = false;
 let automationSaving = false;
 let reconnectTimer = null;
@@ -91,6 +102,24 @@ function formatDate(value, withTime = true) {
   return new Intl.DateTimeFormat(undefined, withTime
     ? { dateStyle: "medium", timeStyle: "short" }
     : { dateStyle: "medium" }).format(date);
+}
+
+function formatDuration(seconds, unavailable = "Estimate unavailable") {
+  const value = seconds == null || seconds === "" ? NaN : Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return unavailable;
+  const rounded = Math.max(0, Math.ceil(value));
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const secs = rounded % 60;
+  if (hours) return `${hours} hr ${minutes} min`;
+  if (minutes) return `${minutes} min ${secs ? `${secs} sec` : ""}`.trim();
+  return `${secs} sec`;
+}
+
+function relativeAge(value) {
+  const date = new Date(value || "");
+  if (!Number.isFinite(date.valueOf())) return "update time unavailable";
+  return `${formatDuration(Math.max(0, (Date.now() - date.valueOf()) / 1000), "unknown")} ago`;
 }
 
 function toast(message, kind = "success") {
@@ -240,7 +269,9 @@ function renderActive() {
   elements.cancelButton.hidden = !run || awaiting || firmwareErase;
   elements.awaitingAction.hidden = !awaiting;
   window.clearInterval(actionCountdownTimer);
+  window.clearInterval(activeTimingTimer);
   if (!run) {
+    elements.taskStatus.hidden = true;
     elements.activeSubtitle.textContent = "The station is ready for a drive.";
     if (cancelHadFocus || focusActiveRunOnRender) {
       focusActiveRunOnRender = false;
@@ -256,15 +287,26 @@ function renderActive() {
   elements.activePercent.textContent = String(Math.round(progress));
   elements.progressBar.style.width = `${progress}%`;
   elements.activeDetail.textContent = run.detail || phaseLabel(run.phase);
+  const taskIsLive = !awaiting && ["queued", "running"].includes(run.status);
+  elements.taskStatus.hidden = !taskIsLive;
+  if (taskIsLive) {
+    updateActiveTiming(run);
+    activeTimingTimer = window.setInterval(() => updateActiveTiming(run), 1000);
+  }
   elements.cancelButton.dataset.runId = run.id;
   if (awaiting) {
     updateActionCountdown(run);
     actionCountdownTimer = window.setInterval(() => updateActionCountdown(run), 1000);
   }
-  const runPhases = ["quick_erase", "full_erase"].includes(run.profile)
+  const fallbackQuickPhases = run.results?.self_test
+    ? ["smart_before", "self_test", "benchmark", "smart_after"]
+    : ["smart_before", "benchmark", "smart_after"];
+  const runPhases = Array.isArray(run.steps) && run.steps.length
+    ? run.steps
+    : ["quick_erase", "full_erase"].includes(run.profile)
     ? ["erase"]
     : run.profile === "quick"
-      ? ["smart_before", "benchmark", "smart_after"]
+      ? fallbackQuickPhases
       : phaseOrder.filter((phase) => phase !== "erase");
   const currentIndex = runPhases.indexOf(run.phase);
   elements.phaseTrack.querySelectorAll("li").forEach((item) => {
@@ -280,6 +322,50 @@ function renderActive() {
     focusActiveRunOnRender = false;
     elements.cancelButton.focus({ preventScroll: true });
   }
+}
+
+function countdownFrom(timing, etaKey, remainingKey) {
+  const eta = new Date(timing?.[etaKey] || "");
+  if (Number.isFinite(eta.valueOf())) return Math.max(0, (eta.valueOf() - Date.now()) / 1000);
+  const rawRemaining = timing?.[remainingKey];
+  const remaining = rawRemaining == null || rawRemaining === "" ? NaN : Number(rawRemaining);
+  const updated = new Date(timing?.calculated_at || timing?.last_update_at || "");
+  if (!Number.isFinite(remaining)) return null;
+  const elapsed = Number.isFinite(updated.valueOf()) ? Math.max(0, (Date.now() - updated.valueOf()) / 1000) : 0;
+  return Math.max(0, remaining - elapsed);
+}
+
+function updateActiveTiming(run) {
+  const task = run?.task || {};
+  const timing = run?.timing || {};
+  const taskProgress = task.progress_percent == null || task.progress_percent === "" ? NaN : Number(task.progress_percent);
+  const hasTaskProgress = Number.isFinite(taskProgress);
+  elements.taskLabel.textContent = task.phase ? phaseLabel(task.phase) : phaseLabel(run?.phase);
+  elements.taskPercent.textContent = hasTaskProgress ? `${Math.floor(Math.max(0, Math.min(100, taskProgress)) * 10) / 10}%` : "Progress unavailable";
+  elements.taskProgressTrack.hidden = !hasTaskProgress;
+  elements.taskProgressBar.style.width = hasTaskProgress ? `${Math.max(0, Math.min(100, taskProgress))}%` : "0";
+  const taskUpdate = task.last_update_at;
+  elements.taskDetail.textContent = `${task.detail || run?.detail || phaseLabel(run?.phase)}${taskUpdate ? ` · Drive update ${relativeAge(taskUpdate)}` : ""}`;
+  const taskStart = new Date(task.started_at || "");
+  const elapsed = timing.phase_elapsed_seconds == null || timing.phase_elapsed_seconds === "" ? NaN : Number(timing.phase_elapsed_seconds);
+  elements.taskElapsed.textContent = Number.isFinite(taskStart.valueOf())
+    ? formatDuration((Date.now() - taskStart.valueOf()) / 1000)
+    : formatDuration(elapsed);
+  elements.taskRemaining.textContent = formatDuration(countdownFrom(timing, "phase_estimated_finish_at", "phase_remaining_seconds"));
+  elements.runRemaining.textContent = formatDuration(countdownFrom(timing, "estimated_finish_at", "remaining_seconds"));
+  elements.runEta.textContent = timing.estimated_finish_at ? formatDate(timing.estimated_finish_at) : "Estimate unavailable";
+  const warnings = [];
+  if (timing.overdue || (timing.estimated_finish_at && new Date(timing.estimated_finish_at).valueOf() <= Date.now())) {
+    warnings.push("Taking longer than estimated. The test is still running.");
+  }
+  if (snapshot?.connected === false) warnings.push("Live station data is unavailable; these times may be stale.");
+  const updateDate = new Date(taskUpdate || "");
+  if (Number.isFinite(updateDate.valueOf()) && Date.now() - updateDate.valueOf() > 120000) {
+    warnings.push(`No new drive progress has been reported for ${formatDuration((Date.now() - updateDate.valueOf()) / 1000)}.`);
+  }
+  if (Array.isArray(timing.notes)) warnings.push(...timing.notes.filter(Boolean));
+  elements.taskWarning.textContent = warnings.join(" ");
+  elements.taskWarning.hidden = warnings.length === 0;
 }
 
 function updateActionCountdown(run) {
@@ -359,7 +445,7 @@ function renderDrives() {
     const eraseAvailability = !snapshot.settings?.allow_destructive && drive.eligible && capabilities.can_erase !== false
       ? " Quick erase and Full erase are disabled by the station’s destructive-operation setting."
       : "";
-    const help = textNode("p", `Quick: SMART snapshots + read benchmark. Extended: adds a long self-test + full read scan. Erase + verify: destructive full-drive write/read checks.${eraseAvailability}`, "profile-help");
+    const help = textNode("p", `Quick: SMART snapshots + a short drive self-test + read benchmark. Extended: runs the long self-test + full read scan. Erase + verify: destructive full-drive write/read checks.${eraseAvailability}`, "profile-help");
     card.append(main, capacity, connection, state, actions);
     if (ownership) card.append(ownership);
     card.append(help);
@@ -431,7 +517,7 @@ function runButton(label, drive, profile, extraDisabled, destructive = false) {
   button.dataset.profile = profile;
   button.disabled = !drive.eligible || extraDisabled;
   if (destructive && !snapshot.settings?.allow_destructive) button.title = "Destructive verification is disabled in the station configuration.";
-  button.addEventListener("click", () => destructive ? openVerify(drive) : startRun(drive, profile));
+  button.addEventListener("click", () => destructive ? openVerify(drive) : (profile === "extended" ? openTestEstimate(drive, { kind: "manual" }) : startRun(drive, profile)));
   return button;
 }
 
@@ -695,7 +781,7 @@ function appendReportActions(run) {
       controls
     );
   } else if (connected.eligible) {
-    controls.append(reportActionButton("Test again (read-only)", "retest", run, retestRun, stationBusy));
+    controls.append(reportActionButton("Test again (read-only)", "retest", run, previewRetest, stationBusy));
     if (snapshot.system?.capabilities?.can_eject !== false) {
       controls.append(reportActionButton("Safely eject drive", "eject", run, ejectRunDrive, stationBusy));
     }
@@ -733,6 +819,15 @@ async function retestRun(run, button) {
       (elements.report.querySelector('[data-report-action="retest"]') || elements.report.querySelector("h3"))?.focus({ preventScroll: true });
     }
   }
+}
+
+function previewRetest(run, button) {
+  const drive = connectedRunDrive(run);
+  if (!drive?.eligible) {
+    retestRun(run, button);
+    return;
+  }
+  openTestEstimate(drive, { kind: "retest", run, button });
 }
 
 async function ejectRunDrive(run, button) {
@@ -937,6 +1032,79 @@ async function startRun(drive, profile, confirmation) {
   } catch (error) { showError(error.message); toast(error.message, "error"); }
 }
 
+function closeTestEstimate() {
+  if (elements.estimateDialog.open) elements.estimateDialog.close();
+  estimateRequest = null;
+  elements.estimateError.textContent = "";
+  elements.estimateSubmit.disabled = true;
+}
+
+function estimateFinish(plan) {
+  if (plan.estimated_finish_at) return plan.estimated_finish_at;
+  const seconds = plan.total_seconds == null || plan.total_seconds === "" ? NaN : Number(plan.total_seconds);
+  return Number.isFinite(seconds) ? new Date(Date.now() + seconds * 1000).toISOString() : null;
+}
+
+async function openTestEstimate(drive, context = { kind: "manual" }) {
+  const request = Object.freeze({
+    drive: Object.freeze({
+      id: drive.id,
+      identity: drive.identity,
+      model: drive.model || "Unknown drive",
+      serial: drive.serial || "",
+      size_bytes: drive.size_bytes
+    }),
+    ...context
+  });
+  estimateRequest = request;
+  elements.estimateDrive.textContent = `${request.drive.model} · ${request.drive.serial || "Serial unavailable"} · ${formatBytes(request.drive.size_bytes)}`;
+  elements.estimateSummary.textContent = "Calculating the test estimate…";
+  elements.estimateDuration.textContent = "—";
+  elements.estimateFinish.textContent = "—";
+  elements.estimateBreakdown.replaceChildren();
+  elements.estimateNotes.replaceChildren();
+  elements.estimateError.textContent = "";
+  elements.estimateSubmit.disabled = true;
+  elements.estimateDialog.showModal();
+  try {
+    const plan = await api(`/api/drives/${encodeURIComponent(request.drive.id)}/test-estimate?profile=extended`);
+    if (estimateRequest !== request) return;
+    estimateRequest = Object.freeze({ ...request, plan });
+    const durationKnown = plan.total_seconds != null && Number.isFinite(Number(plan.total_seconds));
+    const minimumKnown = plan.minimum_seconds != null && Number.isFinite(Number(plan.minimum_seconds));
+    elements.estimateSummary.textContent = durationKnown
+      ? `Extended is expected to take about ${formatDuration(plan.total_seconds)}.`
+      : (minimumKnown
+        ? `Known and provisional stages total about ${formatDuration(plan.minimum_seconds)}. A complete estimate is not available for this drive.`
+        : "A reliable duration estimate is not available for this drive.");
+    elements.estimateDuration.textContent = durationKnown
+      ? formatDuration(plan.total_seconds)
+      : (minimumKnown ? `About ${formatDuration(plan.minimum_seconds)} for known/provisional stages` : "Estimate unavailable");
+    const finish = estimateFinish(plan);
+    elements.estimateFinish.textContent = finish ? formatDate(finish) : "Estimate unavailable";
+    (Array.isArray(plan.phases) ? plan.phases : []).forEach((phase) => {
+      const row = document.createElement("div");
+      row.className = "estimate-phase";
+      row.append(
+        textNode("span", phase.label || phaseLabel(phase.phase)),
+        textNode("span", phase.seconds != null && Number.isFinite(Number(phase.seconds)) ? formatDuration(phase.seconds) : "Estimate unavailable")
+      );
+      elements.estimateBreakdown.append(row);
+    });
+    (Array.isArray(plan.notes) ? plan.notes : []).forEach((note) => elements.estimateNotes.append(textNode("li", note)));
+    if (plan.complete === false && !plan.notes?.length) {
+      elements.estimateNotes.append(textNode("li", "This estimate is incomplete; actual drive timing may differ."));
+    }
+    elements.estimateSubmit.disabled = false;
+    elements.estimateSubmit.focus();
+  } catch (error) {
+    if (estimateRequest === request) {
+      elements.estimateSummary.textContent = "The estimate could not be loaded.";
+      elements.estimateError.textContent = error.message;
+    }
+  }
+}
+
 function openVerify(drive) {
   verifyDrive = drive;
   const phrase = `ERASE ${drive.serial}`;
@@ -1080,20 +1248,40 @@ elements.cancelButton.addEventListener("click", async () => {
   finally { elements.cancelButton.disabled = false; }
 });
 
-async function chooseWaitingAction(action) {
+async function chooseWaitingAction(action, errorTarget = null, expected = null) {
   const run = awaitingActionRun();
   if (!run || choosingAction) return;
+  if (expected) {
+    const currentIdentity = run.drive?.identity || (snapshot.drives || []).find((drive) => drive.id === run.drive_id)?.identity;
+    const deadline = new Date(run.lifecycle?.action_deadline || "");
+    const sameWindow = run.id === expected.runId && currentIdentity && currentIdentity === expected.drive.identity;
+    if (!sameWindow || !Number.isFinite(deadline.valueOf()) || deadline.valueOf() <= Date.now()) {
+      const message = "This Quick choice window expired or belongs to a different drive. Review the current run before choosing an action.";
+      if (errorTarget) errorTarget.textContent = message;
+      showError(message);
+      toast(message, "error");
+      return false;
+    }
+  }
   choosingAction = true;
   elements.actionExtended.disabled = true;
   elements.actionEject.disabled = true;
   try {
-    const result = await api(`/api/runs/${encodeURIComponent(run.id)}/action`, { method: "POST", body: { action } });
+    const targetRunId = expected?.runId || run.id;
+    const result = await api(`/api/runs/${encodeURIComponent(targetRunId)}/action`, { method: "POST", body: { action } });
     chosenActionRunId = run.id;
     toast(result?.detail || (action === "extended" ? "Extended test requested." : "Safe eject requested."));
+    if (errorTarget) closeTestEstimate();
     await refreshState();
+    return true;
   } catch (error) {
     showError(error.message);
     toast(error.message, "error");
+    if (errorTarget) {
+      errorTarget.textContent = error.message;
+      await refreshState().catch(() => {});
+    }
+    return false;
   } finally {
     choosingAction = false;
     const waiting = awaitingActionRun();
@@ -1101,8 +1289,41 @@ async function chooseWaitingAction(action) {
   }
 }
 
-elements.actionExtended.addEventListener("click", () => chooseWaitingAction("extended"));
+elements.actionExtended.addEventListener("click", () => {
+  const run = awaitingActionRun();
+  if (!run) return;
+  const drive = run.drive || (snapshot.drives || []).find((item) => item.id === run.drive_id);
+  if (!drive) {
+    showError("The drive is no longer available.");
+    return;
+  }
+  openTestEstimate({ ...drive, id: drive.id || run.drive_id }, { kind: "action", runId: run.id });
+});
 elements.actionEject.addEventListener("click", () => chooseWaitingAction("eject"));
+
+elements.estimateForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const request = estimateRequest;
+  if (!request?.plan || elements.estimateSubmit.disabled) return;
+  elements.estimateSubmit.disabled = true;
+  elements.estimateError.textContent = "";
+  if (request.kind === "action") {
+    await chooseWaitingAction("extended", elements.estimateError, request);
+    if (estimateRequest) elements.estimateSubmit.disabled = false;
+    return;
+  }
+  closeTestEstimate();
+  if (request.kind === "retest") await retestRun(request.run, request.button);
+  else await startRun(request.drive, "extended");
+});
+
+$("#estimate-close").addEventListener("click", closeTestEstimate);
+$("#estimate-cancel").addEventListener("click", closeTestEstimate);
+elements.estimateDialog.addEventListener("close", () => {
+  estimateRequest = null;
+  elements.estimateError.textContent = "";
+  elements.estimateSubmit.disabled = true;
+});
 
 elements.verifyForm.addEventListener("submit", async (event) => {
   event.preventDefault();

@@ -10,6 +10,7 @@ import socket
 import tempfile
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -467,6 +468,200 @@ def main():
                 erase_page.locator("#erase-cancel").click()
                 erase_context.close()
 
+                # Extended estimates are reviewed before submission, while active runs
+                # distinguish overall progress from the drive's current task progress.
+                timing_state = json.loads(json.dumps(state))
+                timing_drive = {
+                    **timing_state["drives"][0],
+                    "id": "fixture-timing-drive",
+                    "serial": "FIXTURE-TIMING-1",
+                    "eligible": True,
+                    "reasons": [],
+                }
+                timing_state["drives"] = [timing_drive]
+                timing_state["runs"] = []
+                timing_state["system"]["active_run_id"] = None
+                estimate_plan = {
+                    "profile": "extended",
+                    "total_seconds": 28800,
+                    "minimum_seconds": 27000,
+                    "estimated_finish_at": (
+                        datetime.now(UTC) + timedelta(hours=8)
+                    ).isoformat(),
+                    "phases": [
+                        {
+                            "phase": "self_test",
+                            "label": "Extended drive self-test",
+                            "seconds": 25200,
+                            "source": "drive_firmware",
+                        },
+                        {
+                            "phase": "surface",
+                            "label": "Full surface scan",
+                            "seconds": 3600,
+                            "source": "measured_throughput",
+                        },
+                    ],
+                    "notes": ["The drive firmware reports time in coarse increments."],
+                    "complete": True,
+                }
+                timing_context = browser.new_context(viewport={"width": 1200, "height": 900})
+                timing_page = timing_context.new_page()
+                timing_page.goto(base)
+                timing_page.locator("#token").fill(TOKEN)
+                timing_page.get_by_role("button", name="Sign in", exact=True).click()
+                expect(timing_page.locator("#app-view")).to_be_visible()
+                timing_page.route(
+                    "**/api/state", lambda route: route.fulfill(status=200, json=timing_state)
+                )
+                timing_page.route("**/api/events", lambda route: route.abort())
+                timing_page.route(
+                    "**/api/drives/fixture-timing-drive/test-estimate?profile=extended",
+                    lambda route: route.fulfill(status=200, json=estimate_plan),
+                )
+                timing_page.reload()
+                timing_page.get_by_role("button", name="Extended test", exact=True).click()
+                expect(timing_page.locator("#estimate-dialog")).to_contain_text("8 hr 0 min")
+                expect(timing_page.locator("#estimate-dialog")).to_contain_text(
+                    "Extended drive self-test"
+                )
+                expect(timing_page.locator("#estimate-dialog")).to_contain_text(
+                    "coarse increments"
+                )
+                timing_page.locator("#estimate-cancel").click()
+
+                now = datetime.now(UTC)
+                timing_state["runs"] = [
+                    {
+                        "id": "fixture-timed-run",
+                        "drive_id": timing_drive["id"],
+                        "drive": timing_drive,
+                        "profile": "extended",
+                        "status": "running",
+                        "workflow_status": "running",
+                        "phase": "self_test",
+                        "progress": 22,
+                        "detail": "The extended self-test is running.",
+                        "started_at": (now - timedelta(minutes=8)).isoformat(),
+                        "steps": [
+                            "smart_before",
+                            "self_test",
+                            "benchmark",
+                            "surface",
+                            "smart_after",
+                        ],
+                        "results": {"smart_before": {"status": "passed"}},
+                        "logs": [],
+                        "lifecycle": {},
+                        "task": {
+                            "phase": "self_test",
+                            "progress_percent": 10,
+                            "started_at": (now - timedelta(minutes=5)).isoformat(),
+                            "last_update_at": now.isoformat(),
+                            "detail": "Drive firmware reports 90% remaining.",
+                        },
+                        "timing": {
+                            "remaining_seconds": 7260,
+                            "estimated_finish_at": (now + timedelta(seconds=7260)).isoformat(),
+                            "phase_remaining_seconds": 3600,
+                            "phase_estimated_finish_at": (now + timedelta(hours=1)).isoformat(),
+                            "phase_elapsed_seconds": 300,
+                            "overdue": False,
+                            "notes": [],
+                        },
+                    }
+                ]
+                timing_state["system"]["active_run_id"] = "fixture-timed-run"
+                timing_page.reload()
+                expect(timing_page.locator("#active-percent")).to_have_text("22")
+                expect(timing_page.locator("#task-percent")).to_have_text("10%")
+                expect(timing_page.locator("#task-detail")).to_contain_text(
+                    "Drive firmware reports 90% remaining"
+                )
+                expect(timing_page.locator("#run-remaining")).to_contain_text("hr")
+                expect(timing_page.locator("#run-eta")).not_to_have_text("Estimate unavailable")
+
+                timing_state["runs"][0]["timing"].update(
+                    {
+                        "remaining_seconds": 0,
+                        "estimated_finish_at": (now - timedelta(minutes=1)).isoformat(),
+                        "phase_remaining_seconds": None,
+                        "phase_estimated_finish_at": None,
+                        "overdue": True,
+                    }
+                )
+                timing_page.reload()
+                expect(timing_page.locator("#task-warning")).to_contain_text(
+                    "Taking longer than estimated"
+                )
+
+                timing_state["runs"][0]["task"]["progress_percent"] = None
+                timing_state["runs"][0]["timing"] = {
+                    "remaining_seconds": None,
+                    "estimated_finish_at": None,
+                    "phase_remaining_seconds": None,
+                    "phase_estimated_finish_at": None,
+                    "phase_elapsed_seconds": 300,
+                    "overdue": False,
+                    "notes": [],
+                }
+                timing_page.reload()
+                expect(timing_page.locator("#task-percent")).to_have_text(
+                    "Progress unavailable"
+                )
+                expect(timing_page.locator("#run-remaining")).to_have_text(
+                    "Estimate unavailable"
+                )
+
+                timing_state["runs"][0].update(
+                    {
+                        "status": "passed",
+                        "workflow_status": "awaiting_action",
+                        "progress": 100,
+                        "lifecycle": {
+                            "action_deadline": (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+                        },
+                    }
+                )
+                action_calls = []
+
+                def expired_action(route):
+                    action_calls.append(route.request.post_data_json)
+                    route.fulfill(status=409, json={"detail": "The Quick choice window expired."})
+
+                timing_page.route("**/api/runs/fixture-timed-run/action", expired_action)
+                timing_page.route("**/api/runs/fixture-new-window/action", expired_action)
+                timing_page.reload()
+                timing_page.get_by_role("button", name="Run Extended test").click()
+                expect(timing_page.locator("#estimate-dialog")).to_be_visible()
+                expect(timing_page.locator("#action-countdown")).to_contain_text(
+                    "ejects automatically"
+                )
+                first_window = json.loads(json.dumps(timing_state["runs"][0]))
+                timing_state["runs"][0]["id"] = "fixture-new-window"
+                timing_state["system"]["active_run_id"] = "fixture-new-window"
+                timing_page.evaluate("refreshState()")
+                timing_page.get_by_role("button", name="Start Extended", exact=True).click()
+                expect(timing_page.locator("#estimate-error")).to_contain_text(
+                    "different drive"
+                )
+                assert action_calls == []
+
+                # A server-side expiry after a correctly bound confirmation remains
+                # visible in the modal rather than silently selecting another run.
+                timing_state["runs"] = [first_window]
+                timing_state["system"]["active_run_id"] = "fixture-timed-run"
+                timing_page.evaluate("refreshState()")
+                timing_page.locator("#estimate-cancel").click()
+                timing_page.get_by_role("button", name="Run Extended test").click()
+                expect(timing_page.locator("#estimate-dialog")).to_be_visible()
+                timing_page.get_by_role("button", name="Start Extended", exact=True).click()
+                expect(timing_page.locator("#estimate-error")).to_contain_text(
+                    "choice window expired"
+                )
+                assert action_calls == [{"action": "extended"}]
+                timing_context.close()
+
                 context = browser.new_context(viewport={"width": 1440, "height": 1100})
                 page = context.new_page()
                 errors = []
@@ -521,6 +716,9 @@ def main():
                 second.goto(base)
                 expect(second.locator("#app-view")).to_be_visible()
                 page.get_by_role("button", name="Extended test", exact=True).click()
+                expect(page.locator("#estimate-dialog")).to_be_visible()
+                expect(page.locator("#estimate-dialog")).to_contain_text("Estimated duration")
+                page.get_by_role("button", name="Start Extended", exact=True).click()
                 expect(second.locator("#active-content")).to_be_visible()
                 expect(page.locator("#run-list")).to_contain_text("Passed", timeout=15000)
                 expect(second.locator("#run-list")).to_contain_text("Passed", timeout=15000)
@@ -546,6 +744,8 @@ def main():
 
                 # Cancellation is exercised through the UI against a real running job.
                 page.get_by_role("button", name="Extended test", exact=True).click()
+                expect(page.locator("#estimate-dialog")).to_be_visible()
+                page.get_by_role("button", name="Start Extended", exact=True).click()
                 expect(page.locator("#cancel-button")).to_be_visible()
                 page.locator("#cancel-button").click()
                 expect(page.locator("#run-list")).to_contain_text("Cancelled")
@@ -652,7 +852,9 @@ def main():
                 expect(page.get_by_role("button", name="Run Extended test")).to_be_visible()
                 expect(page.get_by_role("button", name="Eject now")).to_be_visible()
                 page.get_by_role("button", name="Run Extended test").click()
-                expect(page.get_by_role("button", name="Run Extended test")).to_be_disabled()
+                expect(page.locator("#estimate-dialog")).to_be_visible()
+                expect(page.locator("#action-countdown")).to_contain_text("ejects automatically")
+                page.get_by_role("button", name="Start Extended", exact=True).click()
                 expect(page.locator("#awaiting-action")).to_be_hidden(timeout=15000)
                 expect(page.locator("#run-list")).to_contain_text("Extended", timeout=15000)
 
@@ -687,7 +889,7 @@ def main():
                 assert not errors, errors
                 browser.close()
             print(
-                "Browser verification passed: access links, RAID takeover, firmware/fallback Quick erase, Full erase, method-bound confirmations, Quick choices, reports, settings, mobile, logout."
+                "Browser verification passed: access links, RAID takeover, erase confirmations, Extended estimates, live task timing, Quick choices, reports, settings, mobile, logout."
             )
         finally:
             server.should_exit = True

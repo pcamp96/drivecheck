@@ -171,14 +171,13 @@ invalidates outstanding links and action buttons. The dashboard URL still needs
 to be reachable from the phone (for example, connected to your tailnet).
 
 After safe power-off, reconnect or cycle the dock's power before another test.
-Filesystem mounting cannot bring an ejected USB device back online. Quick is only
-a brief health screen and read sample; it does not establish full-surface health.
+Filesystem mounting cannot bring an ejected USB device back online. Quick runs the drive's short SMART self-test and a read sample; it does not establish full-surface health.
 
 ## Profiles and automatic intake
 
 | Profile | Checks | Drive writes |
 | --- | --- | --- |
-| Quick | SMART before/after and a 30-second sequential read sample | None |
+| Quick | SMART before/after, firmware short SMART self-test, and a 30-second sequential read sample | None |
 | Extended | SMART, extended drive self-test, read benchmark, full read scan, final SMART | None |
 | Write verification | Extended self-test, read benchmark, full-drive write and checksum readback, SMART before/after | **Entire selected drive overwritten** |
 | Quick erase (manual) | Supported ATA firmware secure erase; otherwise clearly identified quick-format fallback | **Existing data lost** |
@@ -193,6 +192,32 @@ Each drive is attempted once per observed connection. On service restart,
 already-recorded drives aren't automatically retested; run a manual test or
 unplug/reconnect to retry. Unplugging and reconnecting between discovery polls
 may not be observed; use a manual test in that case.
+
+Extended opens an estimate dialog before starting from the dashboard, including
+retests and the Quick action window. Quick completion messages include the
+estimated Extended duration before its Telegram button can start the test.
+The total includes the drive's recommended extended self-test time, the fixed
+30-second benchmark, and a full read scan estimate. The scan estimate uses the
+latest successful read sample for that drive with a 25% scheduling allowance;
+without a sample it explicitly assumes 100 MB/s until the benchmark finishes.
+These are approximate scheduling estimates, not health evidence or deadlines.
+Unknown SMART duration stays unknown rather than being invented.
+
+The dashboard separates overall stage completion from current task progress.
+It shows the current task, firmware-reported percentage (or unavailable), last
+poll, elapsed task time, hours/minutes remaining, and the local finish-time ETA.
+Timers move between polls while firmware progress can remain unchanged. An
+overrun says the task is taking longer than estimated and withdraws its ETA;
+a stalled/offline dashboard marks its timing data stale. During the full read
+scan, the ETA updates using the observed scan rate. It never advances task
+progress merely because time passed.
+
+Quick uses `smartctl -t short`, then waits for a fresh result from that specific
+test before the benchmark. The short test is read-only and checks drive
+mechanical/electrical/read behavior according to its firmware. Its advertised
+runtime plus grace is bounded by a 30-minute safety limit. If the drive/bridge
+cannot run or report it, Quick records incomplete coverage and continues the
+read sample when safe; it does not substitute an old successful test result.
 
 The dashboard's Settings view uses one vertical form. Automation switches save
 immediately and show success or an error; notification edits use Save settings.

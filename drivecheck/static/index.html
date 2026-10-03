@@ -98,6 +98,7 @@
             <div class="progress-number"><strong id="active-percent">0</strong><span>%</span></div>
           </div>
           <div class="progress-track" aria-label="Test progress"><span id="progress-bar"></span></div>
+          <p class="overall-progress-label">Overall test progress</p>
           <ol class="phase-track" id="phase-track">
             <li data-phase="smart_before">Health check</li>
             <li data-phase="self_test">Self-test</li>
@@ -106,6 +107,21 @@
             <li data-phase="smart_after">Final health</li>
             <li data-phase="erase">Erase</li>
           </ol>
+          <div class="task-status" id="task-status" aria-live="polite">
+            <div class="task-status-head">
+              <div><span>Current task</span><strong id="task-label">Preparing</strong></div>
+              <strong id="task-percent">—</strong>
+            </div>
+            <div class="task-progress-track" id="task-progress-track" hidden><span id="task-progress-bar"></span></div>
+            <p id="task-detail"></p>
+            <dl class="task-timing">
+              <div><dt>Task elapsed</dt><dd id="task-elapsed">—</dd></div>
+              <div><dt>Task remaining</dt><dd id="task-remaining">—</dd></div>
+              <div><dt>Test remaining</dt><dd id="run-remaining">—</dd></div>
+              <div><dt>Estimated finish</dt><dd id="run-eta">—</dd></div>
+            </dl>
+            <p class="task-warning" id="task-warning" hidden></p>
+          </div>
           <p class="active-detail" id="active-detail"></p>
           <div class="awaiting-action" id="awaiting-action" hidden>
             <div><strong>Quick test complete</strong><p id="action-countdown" role="status"></p></div>
@@ -242,6 +258,27 @@
       <div class="dialog-actions">
         <button type="button" class="quiet-button" id="erase-cancel">Cancel</button>
         <button type="submit" class="danger-button" id="erase-submit" disabled>Erase drive</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="estimate-dialog" aria-labelledby="estimate-title">
+    <form method="dialog" id="estimate-form">
+      <button class="dialog-close" id="estimate-close" type="button" aria-label="Close test estimate dialog">×</button>
+      <p class="estimate-mark" aria-hidden="true">i</p>
+      <h2 id="estimate-title">Before you start Extended</h2>
+      <p id="estimate-drive"></p>
+      <div class="estimate-summary" id="estimate-summary" role="status">Calculating the test estimate…</div>
+      <dl class="estimate-facts">
+        <div><dt>Estimated duration</dt><dd id="estimate-duration">—</dd></div>
+        <div><dt>Estimated finish</dt><dd id="estimate-finish">—</dd></div>
+      </dl>
+      <div class="estimate-breakdown" id="estimate-breakdown"></div>
+      <ul class="estimate-notes" id="estimate-notes"></ul>
+      <p class="form-error" id="estimate-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" class="quiet-button" id="estimate-cancel">Cancel</button>
+        <button type="submit" id="estimate-submit" disabled>Start Extended</button>
       </div>
     </form>
   </dialog>
