@@ -140,3 +140,86 @@ def test_surface_countdown_is_pinned_to_actual_sample_and_preserves_fractional_p
     later = timing.live_timing(run, clock=CLOCK + timedelta(hours=3))
     assert finished["phase_elapsed_seconds"] == later["phase_elapsed_seconds"] == 3600
     assert finished["phase_estimated_finish_at"] is None
+
+
+def test_firmware_erase_eta_is_estimated_without_fabricating_percent():
+    estimate = timing.build_erase_estimate(
+        DRIVE, "quick_erase", {"method": "ata_secure_erase", "estimated_minutes": 120}, clock=CLOCK
+    )
+    run = {
+        "status": "running",
+        "phase": "erase",
+        "erase_method": "ata_secure_erase",
+        "estimate": estimate,
+        "progress": None,
+        "task": {"phase": "erase", "started_at": CLOCK.isoformat(), "progress_percent": None},
+    }
+    earlier = timing.live_timing(run, clock=CLOCK + timedelta(minutes=5))
+    later = timing.live_timing(run, clock=CLOCK + timedelta(minutes=6))
+    assert earlier["remaining_seconds"] == 115 * 60
+    assert earlier["remaining_seconds"] - later["remaining_seconds"] == 60
+    assert (
+        earlier["estimated_finish_at"]
+        == later["estimated_finish_at"]
+        == (CLOCK + timedelta(hours=2)).isoformat()
+    )
+    assert run["progress"] is None and run["task"]["progress_percent"] is None
+    assert "not measured progress" in " ".join(earlier["notes"])
+    overdue = timing.live_timing(run, clock=CLOCK + timedelta(hours=3))
+    assert overdue["overdue"]
+    assert overdue["remaining_seconds"] is overdue["estimated_finish_at"] is None
+
+
+@pytest.mark.parametrize("minutes", [None, 0, -1, "missing", float("inf")])
+def test_missing_firmware_erase_duration_never_invents_an_eta(minutes):
+    estimate = timing.build_erase_estimate(
+        DRIVE,
+        "quick_erase",
+        {"method": "ata_secure_erase", "estimated_minutes": minutes},
+        clock=CLOCK,
+    )
+    assert estimate["total_seconds"] is estimate["estimated_finish_at"] is None
+    value = timing.live_timing(
+        {"status": "running", "phase": "erase", "estimate": estimate}, clock=CLOCK
+    )
+    assert value["remaining_seconds"] is value["estimated_finish_at"] is None
+    assert not value["overdue"]
+    assert "ETA is unavailable" in " ".join(value["notes"])
+
+
+def test_full_erase_eta_refines_from_verified_byte_progress():
+    estimate = timing.build_erase_estimate(
+        DRIVE, "full_erase", {"method": "full_overwrite"}, clock=CLOCK
+    )
+    assert estimate["total_seconds"] == 100_000
+    run = {
+        "status": "running",
+        "phase": "erase",
+        "erase_method": "full_overwrite",
+        "estimate": estimate,
+        "task": {
+            "phase": "erase",
+            "started_at": CLOCK.isoformat(),
+            "last_update_at": (CLOCK + timedelta(minutes=1)).isoformat(),
+            "progress_percent": 0.15,
+        },
+    }
+    value = timing.live_timing(run, clock=CLOCK + timedelta(minutes=1))
+    assert value["remaining_seconds"] == 39940
+    following = timing.live_timing(run, clock=CLOCK + timedelta(minutes=1, seconds=5))
+    assert following["estimated_finish_at"] == value["estimated_finish_at"]
+    assert following["remaining_seconds"] == value["remaining_seconds"] - 5
+    assert "observed write/read" in " ".join(value["notes"])
+    run.update(status="passed", finished_at=(CLOCK + timedelta(hours=3)).isoformat())
+    assert timing.live_timing(run, clock=CLOCK)["remaining_seconds"] is None
+
+
+def test_quick_format_does_not_borrow_firmware_erase_or_full_overwrite_duration():
+    value = timing.build_erase_estimate(
+        DRIVE,
+        "quick_erase",
+        {"method": "quick_format_exfat", "estimated_minutes": 120},
+        clock=CLOCK,
+    )
+    assert value["total_seconds"] is None
+    assert "operation steps" in " ".join(value["notes"])

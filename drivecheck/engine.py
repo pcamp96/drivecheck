@@ -616,8 +616,14 @@ class Engine:
         drive = await self.hardware.validate(
             drive, destructive=profile == "verify" or profile in ERASE_PROFILES
         )
-        estimate = None
-        if profile not in ERASE_PROFILES:
+        if profile in ERASE_PROFILES:
+            plan = (await self.hardware.erase_plan(drive))[
+                "quick" if profile == "quick_erase" else "full"
+            ]
+            if not plan.get("available") or plan.get("method") != expected_method:
+                raise ValueError("The erase method changed; review a fresh confirmation")
+            estimate = timing.build_erase_estimate(drive, profile, plan)
+        else:
             estimate = await self.test_estimate(drive.id, profile)
         if self.stopping:
             raise ValueError("The station is stopping")
@@ -1086,15 +1092,19 @@ class Engine:
                 }
                 self.record(run, run["detail"])
 
-                async def progress(percent: float, detail: str, index=index):
+                async def progress(percent: float | None, detail: str, index=index):
                     run.update(
                         progress=round(
                             (index + max(0, min(100, percent)) / 100) / len(steps) * 100, 1
-                        ),
+                        )
+                        if percent is not None
+                        else None,
                         detail=detail,
                     )
                     unknown = (
-                        "without a percentage" in detail or "Waiting for a new SMART" in detail
+                        percent is None
+                        or "without a percentage" in detail
+                        or "Waiting for a new SMART" in detail
                     )
                     run["task"].update(
                         progress_percent=None if unknown else round(max(0, min(100, percent)), 4),
@@ -1106,6 +1116,13 @@ class Engine:
                 if phase == "erase":
                     if not self.config.allow_destructive or self._recovery_pending(drive):
                         raise SafetyError("Erase is disabled or firmware recovery is required")
+                    plan = (await self.hardware.erase_plan(drive))[
+                        "quick" if run["profile"] == "quick_erase" else "full"
+                    ]
+                    if not plan.get("available") or plan.get("method") != run["erase_method"]:
+                        raise SafetyError("Erase method changed; review a fresh confirmation")
+                    run["estimate"] = timing.build_erase_estimate(drive, run["profile"], plan)
+                    self.record(run)
                     result = await self.hardware.erase(
                         drive,
                         run["profile"],
@@ -1128,8 +1145,13 @@ class Engine:
                         drive, progress, destructive=run["profile"] == "verify"
                     )
                 run["results"][phase] = result
+                firmware_incomplete = (
+                    phase == "erase"
+                    and run.get("erase_method") == "ata_secure_erase"
+                    and result.get("status") != "passed"
+                )
                 run["task"].update(
-                    progress_percent=100,
+                    progress_percent=None if firmware_incomplete else 100,
                     last_update_at=now(),
                     detail=result.get("detail", run["detail"]),
                 )
@@ -1146,7 +1168,11 @@ class Engine:
             run.update(
                 status=status,
                 detail=detail,
-                progress=100 if len(run["results"]) == len(steps) else run["progress"],
+                progress=None
+                if run.get("erase_method") == "ata_secure_erase" and status != "passed"
+                else 100
+                if len(run["results"]) == len(steps)
+                else run["progress"],
             )
         except asyncio.CancelledError:
             await self.hardware.cancel()

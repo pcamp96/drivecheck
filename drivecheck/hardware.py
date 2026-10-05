@@ -29,7 +29,7 @@ from typing import Any
 from drivecheck.erase import RecoveryJournal, parse_hdparm_security
 from drivecheck.raid import RaidInspector, RaidOwnership
 
-Progress = Callable[[float, str], Awaitable[None]]
+Progress = Callable[[float | None, str], Awaitable[None]]
 
 
 class SafetyError(RuntimeError):
@@ -1248,7 +1248,7 @@ class Hardware:
                 security = await self._ata_security(current)
                 if not security.ready:
                     raise SafetyError("ATA security state changed before erase")
-                await progress(1, "Preparing ATA Secure Erase")
+                await progress(None, "Preparing ATA Secure Erase; progress unavailable")
                 self.firmware_erase_active = True
                 armed = True
                 set_password = await self._runner.run(
@@ -1265,7 +1265,7 @@ class Hardware:
                     return self._ata_recovery_result()
                 payload["stage"] = "password_set"
                 journal.update(payload)
-                await progress(2, "ATA Secure Erase started")
+                await progress(None, "Firmware erase running; progress unavailable")
                 timeout = min(48 * 60 * 60, max(60 * 60, ((estimated_minutes or 720) + 30) * 60))
                 erase = await self._run_ata_erase_command(
                     current, password, device_number, progress, timeout
@@ -1340,7 +1340,7 @@ class Hardware:
                         raise SafetyError("block device number changed")
                     if self._cancel_requested:
                         raise SafetyError("ATA erase cancellation was requested")
-                    await progress(2, "ATA Secure Erase is running in drive firmware")
+                    await progress(None, "Firmware erase running; progress unavailable")
                 except (SafetyError, CommandError) as exc:
                     safety_error = exc
                     await self._runner.cancel()

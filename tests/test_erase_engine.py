@@ -260,3 +260,79 @@ async def test_service_shutdown_does_not_hang_or_eject_armed_firmware(tmp_path):
         assert engine._recovery_pending(drive)
     finally:
         store.close()
+
+
+async def test_queued_firmware_erase_captures_duration_and_null_progress(tmp_path):
+    engine, store = await make_engine(tmp_path)
+    try:
+        hardware = engine.hardware
+        plans = 0
+
+        async def plan(drive):
+            nonlocal plans
+            plans += 1
+            return {
+                "quick": {
+                    "available": True,
+                    "method": "ata_secure_erase",
+                    "estimated_minutes": 120 if plans < 3 else 125,
+                }
+            }
+
+        async def erase(drive, profile, progress, *, recovery_dir, expected_method):
+            await progress(None, "Firmware erase running; progress unavailable")
+            current = store.runs()[0]
+            assert current["progress"] is None and current["task"]["progress_percent"] is None
+            assert current["estimate"]["total_seconds"] == 125 * 60
+            assert current["timing"]["remaining_seconds"] > 0
+            return {
+                "status": "passed",
+                "method": expected_method,
+                "detail": "Firmware erase completed",
+            }
+
+        hardware.erase_plan = plan
+        hardware.erase = erase
+        drive = engine.drives[0]
+        response = await engine.request_erase(
+            drive.id, "quick_erase", "QUICK ERASE " + drive.serial, "ata_secure_erase"
+        )
+        run = response["run"]
+        assert run["estimate"]["total_seconds"] == 120 * 60
+        assert not hardware.calls
+        await engine.execute(run)
+        finished = store.get(run["id"])
+        assert finished["status"] == "passed"
+        assert finished["progress"] == 100
+        assert finished["timing"]["remaining_seconds"] is None
+    finally:
+        store.close()
+
+
+async def test_uncertain_firmware_erase_never_reports_completed_percentage(tmp_path):
+    engine, store = await make_engine(tmp_path)
+    try:
+
+        async def erase(drive, profile, progress, **kwargs):
+            await progress(None, "Firmware erase running; progress unavailable")
+            return {
+                "status": "incomplete",
+                "method": "ata_secure_erase",
+                "recovery_required": True,
+                "detail": "Firmware erase state uncertain",
+            }
+
+        engine.hardware.erase = erase
+        engine.settings.value["auto_eject"] = True
+        drive = engine.drives[0]
+        result = await engine.request_erase(
+            drive.id, "quick_erase", "QUICK ERASE " + drive.serial, "ata_secure_erase"
+        )
+        await engine.execute(result["run"])
+        final = store.get(result["run"]["id"])
+        assert final["status"] == "incomplete"
+        assert final["progress"] is None and final["task"]["progress_percent"] is None
+        assert final["lifecycle"]["eject_status"] == "not_requested"
+        assert not engine.hardware.calls
+    finally:
+        store.close()

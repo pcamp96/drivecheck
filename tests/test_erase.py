@@ -213,6 +213,8 @@ async def test_secure_erase_redacts_password_and_removes_verified_journal(
     ]
     assert sensitive and all(item["sensitive_args"] == {4} for item in sensitive)
     assert updates[-1][0] == 100
+    assert all(percent is None for percent, _detail in updates[:-1])
+    assert any("progress unavailable" in detail for _percent, detail in updates[:-1])
 
 
 @pytest.mark.asyncio

@@ -221,7 +221,12 @@ poll, elapsed task time, hours/minutes remaining, and the local finish-time ETA.
 Timers move between polls while firmware progress can remain unchanged. An
 overrun says the task is taking longer than estimated and withdraws its ETA;
 a stalled/offline dashboard marks its timing data stale. During the full read
-scan, the ETA updates using the observed scan rate. It never advances task
+scan, the ETA updates using the observed scan rate. Firmware Secure Erase uses
+the drive's advertised erase duration when available; its progress remains
+indeterminate because it supplies no measured completion percentage. A missing
+firmware duration is shown as unavailable, rather than guessed. Full erase starts
+with a provisional write/read estimate and refines it from verified byte progress.
+The ETA is withdrawn when an operation exceeds its estimate. It never advances task
 progress merely because time passed.
 
 Quick uses `smartctl -t short`, then waits for a fresh result from that specific

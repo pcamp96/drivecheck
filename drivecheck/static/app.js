@@ -9,6 +9,7 @@ const elements = {
   drivesEmpty: $("#drives-empty"), activeEmpty: $("#active-empty"), activeContent: $("#active-content"),
   activeSubtitle: $("#active-subtitle"), activeDrive: $("#active-drive"), activeSerial: $("#active-serial"),
   activePercent: $("#active-percent"), progressBar: $("#progress-bar"), activeDetail: $("#active-detail"),
+  overallProgressLabel: $(".overall-progress-label"),
   taskStatus: $("#task-status"), taskLabel: $("#task-label"), taskPercent: $("#task-percent"),
   taskProgressTrack: $("#task-progress-track"), taskProgressBar: $("#task-progress-bar"),
   taskDetail: $("#task-detail"), taskElapsed: $("#task-elapsed"), taskRemaining: $("#task-remaining"),
@@ -262,6 +263,7 @@ function renderActive() {
   const run = activeRun() || awaitingActionRun();
   const awaiting = run?.workflow_status === "awaiting_action";
   const firmwareErase = runEraseMethod(run) === "ata_secure_erase";
+  const indeterminateFirmwareErase = firmwareErase && !awaiting && ["queued", "running"].includes(run?.status);
   if (!awaiting || chosenActionRunId !== run?.id) chosenActionRunId = null;
   const cancelHadFocus = document.activeElement === elements.cancelButton;
   elements.activeEmpty.hidden = Boolean(run);
@@ -284,9 +286,16 @@ function renderActive() {
   elements.activeDrive.textContent = drive.model || run.drive_id || "Unknown drive";
   elements.activeSerial.textContent = drive.serial || "Serial unavailable";
   const progress = Math.max(0, Math.min(100, Number(run.progress) || 0));
-  elements.activePercent.textContent = String(Math.round(progress));
-  elements.progressBar.style.width = `${progress}%`;
-  elements.activeDetail.textContent = run.detail || phaseLabel(run.phase);
+  elements.activePercent.parentElement.classList.toggle("indeterminate", indeterminateFirmwareErase);
+  elements.activePercent.textContent = indeterminateFirmwareErase ? "—" : String(Math.round(progress));
+  elements.progressBar.parentElement.hidden = indeterminateFirmwareErase;
+  elements.progressBar.style.width = indeterminateFirmwareErase ? "0" : `${progress}%`;
+  elements.overallProgressLabel.textContent = indeterminateFirmwareErase
+    ? "Firmware erase progress unavailable"
+    : "Overall test progress";
+  elements.activeDetail.textContent = indeterminateFirmwareErase
+    ? firmwareEraseDetail(run)
+    : (run.detail || phaseLabel(run.phase));
   const taskIsLive = !awaiting && ["queued", "running"].includes(run.status);
   elements.taskStatus.hidden = !taskIsLive;
   if (taskIsLive) {
@@ -326,37 +335,80 @@ function renderActive() {
 
 function countdownFrom(timing, etaKey, remainingKey) {
   const eta = new Date(timing?.[etaKey] || "");
-  if (Number.isFinite(eta.valueOf())) return Math.max(0, (eta.valueOf() - Date.now()) / 1000);
+  if (Number.isFinite(eta.valueOf())) {
+    const remaining = (eta.valueOf() - Date.now()) / 1000;
+    return remaining > 0 ? remaining : null;
+  }
   const rawRemaining = timing?.[remainingKey];
   const remaining = rawRemaining == null || rawRemaining === "" ? NaN : Number(rawRemaining);
   const updated = new Date(timing?.calculated_at || timing?.last_update_at || "");
   if (!Number.isFinite(remaining)) return null;
   const elapsed = Number.isFinite(updated.valueOf()) ? Math.max(0, (Date.now() - updated.valueOf()) / 1000) : 0;
-  return Math.max(0, remaining - elapsed);
+  const adjusted = remaining - elapsed;
+  return adjusted > 0 ? adjusted : null;
+}
+
+function timingForRun(run) {
+  const timing = { ...(run?.timing || {}) };
+  const estimate = run?.estimate || {};
+  const runStarted = new Date(run?.started_at || "");
+  const totalSeconds = Number(estimate.total_seconds);
+  const runEtaProvided = Object.prototype.hasOwnProperty.call(timing, "estimated_finish_at");
+  if (!runEtaProvided && !timing.overdue && Number.isFinite(runStarted.valueOf()) && Number.isFinite(totalSeconds) && totalSeconds > 0) {
+    timing.estimated_finish_at = new Date(runStarted.valueOf() + totalSeconds * 1000).toISOString();
+  }
+  const phase = run?.task?.phase || run?.phase;
+  const phaseEstimate = Array.isArray(estimate.phases)
+    ? estimate.phases.find((item) => item.phase === phase)
+    : null;
+  const taskStarted = new Date(run?.task?.started_at || "");
+  const phaseSeconds = Number(phaseEstimate?.seconds);
+  const phaseEtaProvided = Object.prototype.hasOwnProperty.call(timing, "phase_estimated_finish_at");
+  if (!phaseEtaProvided && !timing.overdue && Number.isFinite(taskStarted.valueOf()) && Number.isFinite(phaseSeconds) && phaseSeconds > 0) {
+    timing.phase_estimated_finish_at = new Date(taskStarted.valueOf() + phaseSeconds * 1000).toISOString();
+  }
+  return timing;
+}
+
+function firmwareEraseDetail(run) {
+  if (run?.status === "queued") return "Firmware erase queued; progress unavailable.";
+  if ((run?.task?.phase || run?.phase) !== "erase") return run?.detail || "Preparing firmware erase.";
+  return "Firmware erase running; progress unavailable.";
 }
 
 function updateActiveTiming(run) {
   const task = run?.task || {};
-  const timing = run?.timing || {};
+  const timing = timingForRun(run);
+  const firmwareErase = runEraseMethod(run) === "ata_secure_erase";
   const taskProgress = task.progress_percent == null || task.progress_percent === "" ? NaN : Number(task.progress_percent);
-  const hasTaskProgress = Number.isFinite(taskProgress);
+  const hasTaskProgress = !firmwareErase && Number.isFinite(taskProgress);
   elements.taskLabel.textContent = task.phase ? phaseLabel(task.phase) : phaseLabel(run?.phase);
   elements.taskPercent.textContent = hasTaskProgress ? `${Math.floor(Math.max(0, Math.min(100, taskProgress)) * 10) / 10}%` : "Progress unavailable";
   elements.taskProgressTrack.hidden = !hasTaskProgress;
   elements.taskProgressBar.style.width = hasTaskProgress ? `${Math.max(0, Math.min(100, taskProgress))}%` : "0";
   const taskUpdate = task.last_update_at;
-  elements.taskDetail.textContent = `${task.detail || run?.detail || phaseLabel(run?.phase)}${taskUpdate ? ` · Drive update ${relativeAge(taskUpdate)}` : ""}`;
+  const taskDetail = firmwareErase
+    ? firmwareEraseDetail(run)
+    : (task.detail || run?.detail || phaseLabel(run?.phase));
+  elements.taskDetail.textContent = `${taskDetail}${taskUpdate ? ` · Activity ${relativeAge(taskUpdate)}` : ""}`;
   const taskStart = new Date(task.started_at || "");
   const elapsed = timing.phase_elapsed_seconds == null || timing.phase_elapsed_seconds === "" ? NaN : Number(timing.phase_elapsed_seconds);
   elements.taskElapsed.textContent = Number.isFinite(taskStart.valueOf())
     ? formatDuration((Date.now() - taskStart.valueOf()) / 1000)
     : formatDuration(elapsed);
-  elements.taskRemaining.textContent = formatDuration(countdownFrom(timing, "phase_estimated_finish_at", "phase_remaining_seconds"));
-  elements.runRemaining.textContent = formatDuration(countdownFrom(timing, "estimated_finish_at", "remaining_seconds"));
-  elements.runEta.textContent = timing.estimated_finish_at ? formatDate(timing.estimated_finish_at) : "Estimate unavailable";
+  const taskRemaining = countdownFrom(timing, "phase_estimated_finish_at", "phase_remaining_seconds");
+  const runRemaining = countdownFrom(timing, "estimated_finish_at", "remaining_seconds");
+  const etaDate = new Date(timing.estimated_finish_at || "");
+  const estimateExpired = Number.isFinite(etaDate.valueOf()) && etaDate.valueOf() <= Date.now();
+  const approximate = firmwareErase ? "About " : "";
+  elements.taskRemaining.textContent = taskRemaining == null ? "Estimate unavailable" : `${approximate}${formatDuration(taskRemaining)}`;
+  elements.runRemaining.textContent = runRemaining == null ? "Estimate unavailable" : `${approximate}${formatDuration(runRemaining)}`;
+  elements.runEta.textContent = timing.estimated_finish_at && !estimateExpired
+    ? `${approximate}${formatDate(timing.estimated_finish_at)}`
+    : "Estimate unavailable";
   const warnings = [];
-  if (timing.overdue || (timing.estimated_finish_at && new Date(timing.estimated_finish_at).valueOf() <= Date.now())) {
-    warnings.push("Taking longer than estimated. The test is still running.");
+  if (timing.overdue || estimateExpired) {
+    warnings.push(`Taking longer than estimated. The ${firmwareErase ? "erase" : "test"} is still running; completion time is unavailable.`);
   }
   if (snapshot?.connected === false) warnings.push("Live station data is unavailable; these times may be stale.");
   const updateDate = new Date(taskUpdate || "");
@@ -553,6 +605,14 @@ function phaseLabel(phase) {
 
 function runEraseMethod(run) {
   return run?.erase_method || run?.expected_method || run?.results?.erase?.method || run?.results?.erase?.actual_method || null;
+}
+
+function runProgressLabel(run) {
+  if (runEraseMethod(run) === "ata_secure_erase" && ["queued", "running"].includes(run?.status)) {
+    return "Unavailable (firmware managed)";
+  }
+  const progress = run?.progress == null || run.progress === "" ? NaN : Number(run.progress);
+  return Number.isFinite(progress) ? `${Math.round(Math.max(0, Math.min(100, progress)))}%` : "Unavailable";
 }
 
 function eraseMethodLabel(method) {
@@ -913,7 +973,7 @@ function renderReport(run) {
   header.append(title, downloads);
   const summary = document.createElement("div");
   summary.className = "report-summary";
-  [["Status", statusLabel(run.status)], ["Progress", `${Math.round(Number(run.progress) || 0)}%`], ["Started", formatDate(run.started_at)], ["Finished", formatDate(run.finished_at)]].forEach(([label, value]) => {
+  [["Status", statusLabel(run.status)], ["Progress", runProgressLabel(run)], ["Started", formatDate(run.started_at)], ["Finished", formatDate(run.finished_at)]].forEach(([label, value]) => {
     const cell = document.createElement("div"); cell.append(textNode("span", label), textNode("strong", value)); summary.append(cell);
   });
   const results = document.createElement("div");

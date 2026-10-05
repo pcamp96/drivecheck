@@ -132,6 +132,8 @@ main > section { max-width: 1350px; margin: 0 auto 58px; scroll-margin-top: 28px
 .progress-number { display: flex; align-items: baseline; line-height: 1; }
 .progress-number strong { font-size: clamp(2.8rem, 7vw, 5.2rem); letter-spacing: -.06em; }
 .progress-number span { font-size: 1.3rem; color: #9fb3cb; }
+.progress-number.indeterminate span { display: none; }
+.progress-number.indeterminate strong { color: #9fb3cb; letter-spacing: 0; }
 .progress-track { height: 8px; margin: 22px 0 20px; overflow: hidden; border-radius: 5px; background: #405672; }
 .progress-track span { display: block; width: 0; height: 100%; background: #79a2f4; transition: width .35s ease; }
 .overall-progress-label { margin: -14px 0 18px; color: #91a4bb; font-size: 11px; text-align: right; }

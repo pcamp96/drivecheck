@@ -613,6 +613,110 @@ def main():
                     "Estimate unavailable"
                 )
 
+                # ATA firmware erase reports no real percentage. Even if an older
+                # station sends its synthetic 2%, show indeterminate progress while
+                # retaining an approximate duration when the run has one.
+                timed_run = json.loads(json.dumps(timing_state["runs"][0]))
+                firmware_started = datetime.now(UTC) - timedelta(minutes=5)
+                firmware_run = {
+                    "id": "fixture-firmware-erase",
+                    "drive_id": timing_drive["id"],
+                    "drive": timing_drive,
+                    "profile": "quick_erase",
+                    "erase_method": "ata_secure_erase",
+                    "status": "running",
+                    "workflow_status": "testing",
+                    "phase": "erase",
+                    "progress": 2,
+                    "detail": "ATA Secure Erase is running in drive firmware",
+                    "started_at": firmware_started.isoformat(),
+                    "steps": ["erase"],
+                    "results": {},
+                    "logs": [],
+                    "lifecycle": {},
+                    "task": {
+                        "phase": "erase",
+                        "progress_percent": 2,
+                        "started_at": firmware_started.isoformat(),
+                        "last_update_at": datetime.now(UTC).isoformat(),
+                        "detail": "ATA Secure Erase is running in drive firmware",
+                    },
+                    "estimate": {
+                        "total_seconds": 3600,
+                        "phases": [
+                            {"phase": "erase", "seconds": 3600, "source": "drive_firmware"}
+                        ],
+                        "notes": ["Drive firmware duration is approximate."],
+                    },
+                }
+                timing_state["runs"] = [firmware_run]
+                timing_state["system"]["active_run_id"] = firmware_run["id"]
+                timing_page.reload()
+                expect(timing_page.locator("#active-percent")).to_have_text("—")
+                expect(timing_page.locator("#progress-bar").locator("..")).to_be_hidden()
+                expect(timing_page.locator("#task-percent")).to_have_text(
+                    "Progress unavailable"
+                )
+                expect(timing_page.locator("#task-detail")).to_contain_text(
+                    "Firmware erase running; progress unavailable"
+                )
+                expect(timing_page.locator("#task-detail")).to_contain_text("Activity")
+                expect(timing_page.locator("#run-remaining")).to_contain_text("About")
+                expect(timing_page.locator("#run-eta")).to_contain_text("About")
+                expect(timing_page.locator("#cancel-button")).to_be_hidden()
+                timing_page.locator(
+                    '#run-list [data-run-id="fixture-firmware-erase"]'
+                ).click()
+                expect(timing_page.locator("#report")).to_contain_text(
+                    "Unavailable (firmware managed)"
+                )
+
+                # An explicit null ETA is an instruction from the backend, not a
+                # missing field. Do not resurrect the original provisional estimate.
+                firmware_run["timing"] = {
+                    "remaining_seconds": 10,
+                    "estimated_finish_at": None,
+                    "phase_remaining_seconds": 10,
+                    "phase_estimated_finish_at": None,
+                    "phase_elapsed_seconds": 300,
+                    "overdue": True,
+                    "calculated_at": (datetime.now(UTC) - timedelta(seconds=20)).isoformat(),
+                    "notes": [],
+                }
+                firmware_run["task"]["last_update_at"] = datetime.now(UTC).isoformat()
+                timing_page.reload()
+                expect(timing_page.locator("#run-remaining")).to_have_text(
+                    "Estimate unavailable"
+                )
+                expect(timing_page.locator("#run-eta")).to_have_text("Estimate unavailable")
+                expect(timing_page.locator("#task-warning")).to_contain_text(
+                    "completion time is unavailable"
+                )
+
+                # Runs started by the previous backend have neither timing nor an
+                # estimate. Keep those honest while still suppressing the fake 2%.
+                firmware_run.pop("estimate")
+                firmware_run.pop("timing")
+                firmware_run["started_at"] = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
+                firmware_run["task"]["started_at"] = firmware_run["started_at"]
+                timing_page.reload()
+                expect(timing_page.locator("#active-percent")).to_have_text("—")
+                expect(timing_page.locator("#run-remaining")).to_have_text(
+                    "Estimate unavailable"
+                )
+
+                firmware_run["status"] = "queued"
+                firmware_run["phase"] = "queued"
+                firmware_run["started_at"] = None
+                firmware_run["task"] = {}
+                timing_page.reload()
+                expect(timing_page.locator("#active-detail")).to_have_text(
+                    "Firmware erase queued; progress unavailable."
+                )
+
+                timing_state["runs"] = [timed_run]
+                timing_state["system"]["active_run_id"] = timed_run["id"]
+
                 timing_state["runs"][0].update(
                     {
                         "status": "passed",

@@ -100,6 +100,51 @@ def build_estimate(drive, profile, info, read_mbps=None, *, clock=None) -> dict:
     }
 
 
+def build_erase_estimate(drive, profile, plan, *, clock=None) -> dict:
+    """Keep duration estimates separate from measured erase completion."""
+    clock = clock or datetime.now(UTC)
+    method = plan.get("method")
+    seconds = None
+    source = "duration unavailable"
+    notes = []
+    if method == "ata_secure_erase":
+        minutes = positive(plan.get("estimated_minutes"))
+        seconds = minutes * 60 if minutes is not None else None
+        source = "drive firmware recommendation"
+        notes.append(
+            "Firmware erase does not report a completion percentage. The countdown is an estimate, not measured progress."
+        )
+        if seconds is None:
+            notes.append(
+                "The drive did not supply a usable firmware erase duration; ETA is unavailable."
+            )
+    elif method == "full_overwrite":
+        seconds = math.ceil(drive.size_bytes * 2 / 100_000_000 * 1.25)
+        source = "provisional write/read throughput assumption"
+        notes.append(
+            "Full erase provisionally assumes 100 MB/s for writing and read-back verification plus a 25% allowance; ETA updates from actual I/O."
+        )
+    elif method == "quick_format_exfat":
+        notes.append(
+            "Quick format duration is unavailable; its percentage describes operation steps, not erased sectors."
+        )
+    return {
+        "profile": profile,
+        "method": method,
+        "total_seconds": seconds,
+        "minimum_seconds": seconds,
+        "estimated_finish_at": (clock + timedelta(seconds=seconds)).isoformat()
+        if seconds is not None
+        else None,
+        "phases": [
+            {"phase": "erase", "label": LABELS["erase"], "seconds": seconds, "source": source}
+        ],
+        "notes": notes,
+        "complete": seconds is not None,
+        "generated_at": clock.isoformat(),
+    }
+
+
 def live_timing(run: dict, *, clock=None) -> dict:
     clock = clock or datetime.now(UTC)
     task = run.get("task", {})
@@ -114,8 +159,8 @@ def live_timing(run: dict, *, clock=None) -> dict:
             )
         except (ValueError, TypeError):
             pass
-    phases = run.get("estimate", {}).get("phases", [])
-    notes = list(run.get("estimate", {}).get("notes", []))
+    phases = (run.get("estimate") or {}).get("phases", [])
+    notes = list((run.get("estimate") or {}).get("notes", []))
     phase = task.get("phase", run.get("phase"))
     elapsed = 0
     try:
@@ -127,7 +172,8 @@ def live_timing(run: dict, *, clock=None) -> dict:
     seconds = current.get("seconds") if current else None
     # During surface I/O use its actual reported completion to refine the rate.
     percent = positive(task.get("progress_percent"))
-    if phase == "surface" and percent and 0 < percent < 100 and elapsed >= 30:
+    full_erase = phase == "erase" and run.get("erase_method") == "full_overwrite"
+    if (phase == "surface" or full_erase) and percent and 0 < percent < 100 and elapsed >= 30:
         observed_elapsed = elapsed
         try:
             observed = datetime.fromisoformat(task["last_update_at"].replace("Z", "+00:00"))
@@ -136,9 +182,12 @@ def live_timing(run: dict, *, clock=None) -> dict:
             pass
         if observed_elapsed >= 30:
             seconds = observed_elapsed * 100 / percent
-        notes = [note for note in notes if not note.startswith("Full scan")]
+        prefix = "Full erase" if full_erase else "Full scan"
+        notes = [note for note in notes if not note.startswith(prefix)]
         notes.append(
-            "Full scan ETA now uses the observed rate of this scan; unread regions may take longer."
+            "Full erase ETA uses the observed write/read verification rate; later regions may take longer."
+            if full_erase
+            else "Full scan ETA now uses the observed rate of this scan; unread regions may take longer."
         )
     overdue = seconds is not None and elapsed > seconds and run.get("status") == "running"
     phase_remaining = max(0, seconds - elapsed) if seconds is not None and not overdue else None
