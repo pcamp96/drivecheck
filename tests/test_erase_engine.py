@@ -39,9 +39,10 @@ class EraseHardware(Hardware):
         self.calls.append((profile, expected_method))
         self.entered.set()
         if self.hold:
-            recovery_dir.mkdir()
-            (recovery_dir / f"{drive.identity}.json").write_text("{}")
-            self.firmware_erase_active = True
+            if expected_method == "ata_secure_erase":
+                recovery_dir.mkdir()
+                (recovery_dir / f"{drive.identity}.json").write_text("{}")
+                self.firmware_erase_active = True
             await asyncio.sleep(100)
         return {"status": "passed", "method": expected_method, "detail": "Erase completed."}
 
@@ -334,5 +335,104 @@ async def test_uncertain_firmware_erase_never_reports_completed_percentage(tmp_p
         assert final["progress"] is None and final["task"]["progress_percent"] is None
         assert final["lifecycle"]["eject_status"] == "not_requested"
         assert not engine.hardware.calls
+    finally:
+        store.close()
+
+
+async def test_firmware_cancel_is_rejected_without_stopping_active_task(tmp_path):
+    engine, store = await make_engine(tmp_path)
+    try:
+        drive = engine.drives[0]
+        response = await engine.request_erase(
+            drive.id, "quick_erase", f"QUICK ERASE {drive.serial}", "ata_secure_erase"
+        )
+        run = response["run"]
+        run["status"] = "running"
+        store.save(run)
+        engine.active_run_id = run["id"]
+        engine.hardware.firmware_erase_active = True
+        with pytest.raises(ValueError, match="Firmware erase"):
+            await engine.cancel(run["id"], testing_only=True)
+        assert store.get(run["id"])["status"] == "running"
+        assert not engine.hardware.calls
+    finally:
+        store.close()
+
+
+async def test_stale_cancel_preserves_release_window_and_queued_erase_can_cancel(tmp_path):
+    engine, store = await make_engine(tmp_path)
+    try:
+        drive = engine.drives[0]
+        response = await engine.request_erase(
+            drive.id, "quick_erase", f"QUICK ERASE {drive.serial}", "ata_secure_erase"
+        )
+        run = response["run"]
+        assert (await engine.cancel(run["id"], testing_only=True))["status"] == "cancelled"
+        assert store.get(run["id"])["status"] == "cancelled"
+        run.update(status="passed", workflow_status="awaiting_action")
+        store.save(run)
+        engine.action_waits[run["id"]] = {"event": asyncio.Event()}
+        assert (await engine.cancel(run["id"], testing_only=True))["status"] == "already_finished"
+        assert store.get(run["id"])["workflow_status"] == "awaiting_action"
+        assert not engine.action_waits[run["id"]]["event"].is_set()
+        assert not engine.hardware.calls
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "profile,method,status,label,action",
+    [
+        ("quick", None, "running", "Cancel test", "cancel"),
+        ("full_erase", "full_overwrite", "running", "Cancel erase", "cancel"),
+        ("quick_erase", "quick_format", "running", "Cancel erase", "cancel"),
+        ("quick_erase", "ata_secure_erase", "queued", "Cancel erase", "cancel"),
+        ("quick_erase", "ata_secure_erase", "running", "Why can't I cancel?", "cancel_info"),
+    ],
+)
+async def test_started_telegram_controls_match_actual_cancellation_support(
+    tmp_path, profile, method, status, label, action
+):
+    engine, store = await make_engine(tmp_path)
+    try:
+        authorize(engine)
+        run = await engine.enqueue(engine.drives[0].id, "quick")
+        run.update(profile=profile, erase_method=method, status=status)
+        store.save(run)
+        button = engine.telegram_markup(f"{run['id']}:started")["inline_keyboard"][0][0]
+        assert button == {"text": label, "callback_data": f"dc:{run['id']}:{action}"}
+        run["status"] = "passed"
+        store.save(run)
+        markup = engine.telegram_markup(f"{run['id']}:started")
+        assert not markup or all(
+            not button.get("callback_data", "").endswith((":cancel", ":cancel_info"))
+            for row in markup["inline_keyboard"]
+            for button in row
+        )
+    finally:
+        store.close()
+
+
+async def test_full_erase_cancel_stops_work_without_ejecting_partial_drive(tmp_path):
+    engine, store = await make_engine(tmp_path)
+    try:
+        drive = engine.drives[0]
+        engine.settings.value["auto_eject"] = True
+        engine.hardware.hold = True
+        response = await engine.request_erase(
+            drive.id, "full_erase", f"FULL ERASE {drive.serial}", "full_overwrite"
+        )
+        run = response["run"]
+        engine.active_run_id = run["id"]
+        engine.active_task = asyncio.create_task(engine.execute(run))
+        await asyncio.wait_for(engine.hardware.entered.wait(), 1)
+        result = await engine.cancel(run["id"], testing_only=True)
+        assert result["status"] == "cancelled"
+        assert engine.active_task.done()
+        stored = store.get(run["id"])
+        assert stored["status"] == "cancelled"
+        assert stored["lifecycle"]["eject_status"] == "not_requested"
+        assert "eject" not in engine.hardware.calls
+        assert not engine.hardware.firmware_erase_active
     finally:
         store.close()

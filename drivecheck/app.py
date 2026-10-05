@@ -315,10 +315,11 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
     @app.post("/api/runs/{run_id}/cancel", dependencies=[Depends(authenticated)])
     async def cancel_run(run_id: str):
         try:
-            await engine().cancel(run_id)
+            await engine().cancel(run_id, testing_only=True)
             return {"ok": True}
         except ValueError as error:
-            raise HTTPException(404, str(error)) from None
+            code = 404 if engine().store.get(run_id) is None else 409
+            raise HTTPException(code, str(error)) from None
 
     @app.post("/api/runs/{run_id}/retest", dependencies=[Depends(authenticated)])
     async def retest_run(run_id: str):

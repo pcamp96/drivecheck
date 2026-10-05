@@ -435,6 +435,8 @@ class Engine:
             f"{drive.model}\nSerial: {drive.serial}\nCapacity: {drive.size_bytes / 1e12:.2f} TB\n\n"
             f"Method: {plan['detail']}\nAll data on this drive will be lost."
         )
+        if plan["method"] == "ata_secure_erase":
+            message += "\nCannot safely cancel once firmware erase starts."
         if plan["method"] == "quick_format_exfat":
             message += (
                 "\nQuick format is NOT secure erasure; old file contents may remain recoverable."
@@ -686,16 +688,18 @@ class Engine:
         self.store.save(run)
         self.publish()
 
-    async def cancel(self, run_id: str):
+    async def cancel(self, run_id: str, *, testing_only: bool = False):
+        run = self.store.get(run_id)
+        if run is None:
+            raise ValueError("Test not found")
+        if testing_only and run["status"] not in {"queued", "running"}:
+            return {"status": "already_finished", "detail": "This job has already finished."}
         if run_id == self.active_run_id and getattr(self.hardware, "firmware_erase_active", False):
             raise ValueError(
                 "Firmware erase is active or needs recovery; do not cancel or power off the drive"
             )
-        run = self.store.get(run_id)
-        if run is None:
-            raise ValueError("Test not found")
         if run["status"] in TERMINAL and run.get("workflow_status") not in BUSY_WORKFLOWS:
-            return
+            return {"status": "already_finished", "detail": "This job has already finished."}
         if self.active_run_id == run_id and self.active_task:
             self.active_task.cancel()
             # Wait until child processes and drive self-test have actually stopped.
@@ -706,6 +710,10 @@ class Engine:
                 status="cancelled", finished_at=now(), detail="Cancelled before testing started"
             )
             self.record(run, run["detail"])
+        return {
+            "status": "cancelled",
+            "detail": "Cancellation completed. Erased data is not restored.",
+        }
 
     async def retest(self, run_id: str) -> dict:
         original = self.store.get(run_id)
@@ -1275,6 +1283,26 @@ class Engine:
             (int(chat) > 0 and (not sender or sender == chat))
             or (int(chat) < 0 and sender.isdigit() and int(sender) > 0)
         )
+        if (
+            event == "started"
+            and controls_authorized
+            and run
+            and run["status"] in {"queued", "running"}
+        ):
+            firmware = run.get("erase_method") == "ata_secure_erase" and run["status"] == "running"
+            rows.append(
+                [
+                    {
+                        "text": "Why can't I cancel?"
+                        if firmware
+                        else "Cancel erase"
+                        if run["profile"] in ERASE_PROFILES or run["profile"] == "verify"
+                        else "Cancel test",
+                        "callback_data": f"dc:{run_id}:"
+                        + ("cancel_info" if firmware else "cancel"),
+                    }
+                ]
+            )
         wait = self.action_waits.get(run_id)
         context_ready = False
         if context and event == "reconnected" and controls_authorized:

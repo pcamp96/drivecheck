@@ -389,3 +389,11 @@ async def test_delivery_is_not_confirmed_if_provider_omits_attachment(provider):
             httpx.MockTransport(handler),
             attachment={"filename": "report.txt", "text": "Read failure"},
         )
+
+
+def test_firmware_start_explains_cancellation_is_unavailable():
+    message = run_message(
+        sample_run(status="running", profile="quick_erase", erase_method="ata_secure_erase"),
+        event="started",
+    )
+    assert "Cancellation: Unavailable once firmware erase starts." in message

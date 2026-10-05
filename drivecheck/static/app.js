@@ -47,6 +47,13 @@ const elements = {
   dashboardView: $("#dashboard-view"), settingsView: $("#settings"), pageTitle: $("#page-title")
 };
 
+const cancelHelp = document.createElement("p");
+cancelHelp.id = "cancel-help";
+cancelHelp.className = "cancel-help";
+cancelHelp.hidden = true;
+elements.cancelButton.parentElement.after(cancelHelp);
+elements.cancelButton.setAttribute("aria-describedby", "cancel-help");
+
 let snapshot = null;
 let events = null;
 let selectedRunId = null;
@@ -268,7 +275,15 @@ function renderActive() {
   const cancelHadFocus = document.activeElement === elements.cancelButton;
   elements.activeEmpty.hidden = Boolean(run);
   elements.activeContent.hidden = !run;
-  elements.cancelButton.hidden = !run || awaiting || firmwareErase;
+  const firmwareCancelBlocked = firmwareErase && run?.status === "running";
+  const destructive = ["quick_erase", "full_erase", "verify"].includes(run?.profile);
+  elements.cancelButton.hidden = !run || awaiting;
+  elements.cancelButton.disabled = firmwareCancelBlocked;
+  elements.cancelButton.textContent = destructive ? "Cancel erase" : "Cancel test";
+  cancelHelp.hidden = !run || awaiting || !destructive;
+  cancelHelp.textContent = firmwareCancelBlocked
+    ? "Firmware erase cannot be cancelled safely after it starts. Interrupting it can leave the drive locked. Keep the drive powered and connected."
+    : "Cancelling stops further work; it does not restore data already erased.";
   elements.awaitingAction.hidden = !awaiting;
   window.clearInterval(actionCountdownTimer);
   window.clearInterval(activeTimingTimer);
@@ -1258,6 +1273,9 @@ async function openErase(drive, profile) {
     } else {
       elements.eraseMethod.textContent = `${eraseMethodLabel(option.method)}.${estimate} ${option.detail || ""}`.trim();
     }
+    if (option.method === "ata_secure_erase") {
+      elements.eraseMethod.textContent += " Cannot safely cancel once firmware erase starts.";
+    }
     elements.eraseSubmit.disabled = false;
     elements.eraseConfirmation.focus();
   } catch (error) {
@@ -1305,7 +1323,7 @@ elements.cancelButton.addEventListener("click", async () => {
   elements.cancelButton.disabled = true;
   try { await api(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }); toast("Cancellation requested."); await refreshState(); }
   catch (error) { showError(error.message); toast(error.message, "error"); }
-  finally { elements.cancelButton.disabled = false; }
+  finally { renderActive(); }
 });
 
 async function chooseWaitingAction(action, errorTarget = null, expected = null) {

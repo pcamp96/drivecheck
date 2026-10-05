@@ -11,7 +11,7 @@ import httpx
 from drivecheck.hardware import SafetyError
 
 CALLBACK = re.compile(
-    r"dc:([0-9a-f]{32}):(quick|extended|eject|reconnect|erase|quick_erase|full_erase)\Z"
+    r"dc:([0-9a-f]{32}):(quick|extended|eject|reconnect|erase|quick_erase|full_erase|cancel|cancel_info)\Z"
 )
 
 
@@ -236,6 +236,34 @@ class TelegramInterface:
                 token, callback_id, "This DriveCheck action is no longer valid."
             )
         run_id, action = match.groups()
+        if action == "cancel_info":
+            return await self._answer(
+                token,
+                callback_id,
+                "Firmware erase cannot be stopped safely once started. Interrupting it can leave the drive locked. Keep it powered and connected.",
+                alert=True,
+            )
+        if action == "cancel":
+            try:
+                result = await self.engine.cancel(run_id, testing_only=True)
+            except (KeyError, SafetyError, ValueError) as error:
+                if not self._signature_matches(signature):
+                    return False
+                reason = (
+                    "Firmware erase cannot be stopped safely. Keep the drive powered and connected."
+                    if "Firmware erase" in str(error)
+                    else "This cancellation is unavailable. Open the dashboard for current status."
+                )
+                return await self._answer(token, callback_id, reason, alert=True)
+            if not self._signature_matches(signature):
+                return False
+            return await self._answer(
+                token,
+                callback_id,
+                "This job already finished."
+                if result and result.get("status") == "already_finished"
+                else "Job cancelled. Erased data is not restored.",
+            )
         if action == "erase":
             return await self._answer(
                 token,
@@ -260,8 +288,7 @@ class TelegramInterface:
                 self._pending.clear()
                 return False
             message_text = str(
-                result.get("message")
-                or "DriveCheck refreshed the connected-drive status."
+                result.get("message") or "DriveCheck refreshed the connected-drive status."
             )
             reply_markup = result.get("reply_markup")
             if not isinstance(reply_markup, dict):

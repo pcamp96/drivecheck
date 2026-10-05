@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import httpx
+import pytest
 
 from drivecheck.hardware import SafetyError
 from drivecheck.telegram import TelegramInterface
@@ -28,9 +29,18 @@ class Engine:
         self.reconnects = []
         self.erase_begins = []
         self.erase_confirms = []
+        self.cancellations = []
+        self.cancel_result = {"status": "cancelled"}
+        self.cancel_error = None
 
     def publish(self):
         self.published += 1
+
+    async def cancel(self, run_id, *, testing_only=False):
+        self.cancellations.append((run_id, testing_only))
+        if self.cancel_error:
+            raise self.cancel_error
+        return self.cancel_result
 
     async def choose_action(self, run_id, action):
         self.actions.append((run_id, action))
@@ -238,9 +248,7 @@ async def test_reconnect_rescans_then_sends_fresh_controls_and_acknowledges():
         "Quick test",
         "Extended test",
     ]
-    answer = next(
-        body for path, body in provider_calls if path.endswith("/answerCallbackQuery")
-    )
+    answer = next(body for path, body in provider_calls if path.endswith("/answerCallbackQuery"))
     assert answer["callback_query_id"] == "reconnect"
     assert answer["text"] == "Drive reconnected and controls refreshed."
 
@@ -591,3 +599,45 @@ async def test_pending_prompt_memory_is_bounded_and_send_errors_are_sanitized():
     assert await interface._send("123:secret_token", -100, "Prompt") is None
     assert engine.telegram_error == "Telegram did not confirm the interactive message."
     assert "secret" not in engine.telegram_error
+
+
+@pytest.mark.parametrize(
+    "action,user,status,error,expected_calls,text",
+    [
+        ("cancel", 42, "cancelled", None, 1, "Job cancelled"),
+        ("cancel", 42, "already_finished", None, 1, "already finished"),
+        ("cancel", 99, "cancelled", None, 0, "Not authorized"),
+        ("cancel_info", 99, "cancelled", None, 0, "Not authorized"),
+        ("cancel_info", 42, "cancelled", None, 0, "cannot be stopped safely"),
+        (
+            "cancel",
+            42,
+            "cancelled",
+            ValueError("Firmware erase is active"),
+            1,
+            "cannot be stopped safely",
+        ),
+    ],
+)
+async def test_cancel_controls_authorize_sender_and_preserve_firmware_safety(
+    action, user, status, error, expected_calls, text
+):
+    engine = Engine()
+    engine.cancel_result = {"status": status}
+    engine.cancel_error = error
+    answers = []
+
+    def handler(request):
+        answers.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    interface = TelegramInterface(engine, transport=httpx.MockTransport(handler))
+    assert await interface._handle_update(
+        "123:secret_token",
+        engine.settings.value["notifications"],
+        callback(1, action=action, user=user),
+        ("123:secret_token", "-100", "42"),
+    )
+    assert engine.cancellations == [(RUN_ID, True)] * expected_calls
+    assert text in answers[0]["text"]
+    assert not engine.actions and not engine.erase_begins

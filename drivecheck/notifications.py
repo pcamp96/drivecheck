@@ -158,7 +158,7 @@ def _clean_line(value: object, *, fallback: str = "", limit: int = 280) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if not text:
         return fallback
-    if text[:1] in "[{" or "\"json_format_version\"" in text:
+    if text[:1] in "[{" or '"json_format_version"' in text:
         return fallback
     if len(text) > limit:
         text = text[: limit - 1].rstrip(" ,;:") + "…"
@@ -335,6 +335,8 @@ def run_message(run: dict, demo: bool = False, event: str | None = None) -> str:
         estimate = _started_estimate(run)
         if estimate:
             lines.append(estimate)
+        if run.get("erase_method") == "ata_secure_erase":
+            lines.append("Cancellation: Unavailable once firmware erase starts.")
         return "\n".join(lines)
 
     if recovery:
@@ -386,7 +388,9 @@ def run_message(run: dict, demo: bool = False, event: str | None = None) -> str:
         if run.get("workflow_status") == "awaiting_action" and remaining:
             lines.extend(["", f"Choose the next action below. Auto-eject in {remaining}."])
         else:
-            lines.extend(["", "Safe eject is in progress.", "Wait for the green Safe to remove message."])
+            lines.extend(
+                ["", "Safe eject is in progress.", "Wait for the green Safe to remove message."]
+            )
     elif lifecycle.get("eject_status") == "ejected":
         lines.extend(["", "Safe eject: Confirmed."])
     elif lifecycle.get("eject_status") == "not_requested":

@@ -287,7 +287,11 @@ takeover are currently Linux-only.
 Firmware erase uses a temporary password with a protected recovery record under
 `<data directory>/erase-recovery/<drive identity>.json` (directory 0700, file 0600).
 The password never goes into reports or messages. Once firmware erase is armed,
-normal cancellation is unavailable. A failure, timeout, disconnect, or interrupted
+normal cancellation is unavailable. The dashboard shows a disabled **Cancel erase**
+button with the reason; Telegram offers **Why can’t I cancel?**. Keep the drive
+powered and connected. Software quick formats and full overwrites can be cancelled
+from the dashboard or Telegram, but cancellation does not restore erased data.
+Queued jobs can be cancelled before they start. A failure, timeout, disconnect, or interrupted
 service leaves the record intact, marks the job incomplete, and blocks testing,
 erasing, and ejection of that drive, including after restart. Do not power off;
 inspect the recovery record and drive security state before deliberate recovery.

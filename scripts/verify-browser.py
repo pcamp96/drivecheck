@@ -485,9 +485,7 @@ def main():
                     "profile": "extended",
                     "total_seconds": 28800,
                     "minimum_seconds": 27000,
-                    "estimated_finish_at": (
-                        datetime.now(UTC) + timedelta(hours=8)
-                    ).isoformat(),
+                    "estimated_finish_at": (datetime.now(UTC) + timedelta(hours=8)).isoformat(),
                     "phases": [
                         {
                             "phase": "self_test",
@@ -525,9 +523,7 @@ def main():
                 expect(timing_page.locator("#estimate-dialog")).to_contain_text(
                     "Extended drive self-test"
                 )
-                expect(timing_page.locator("#estimate-dialog")).to_contain_text(
-                    "coarse increments"
-                )
+                expect(timing_page.locator("#estimate-dialog")).to_contain_text("coarse increments")
                 timing_page.locator("#estimate-cancel").click()
 
                 now = datetime.now(UTC)
@@ -606,12 +602,8 @@ def main():
                     "notes": [],
                 }
                 timing_page.reload()
-                expect(timing_page.locator("#task-percent")).to_have_text(
-                    "Progress unavailable"
-                )
-                expect(timing_page.locator("#run-remaining")).to_have_text(
-                    "Estimate unavailable"
-                )
+                expect(timing_page.locator("#task-percent")).to_have_text("Progress unavailable")
+                expect(timing_page.locator("#run-remaining")).to_have_text("Estimate unavailable")
 
                 # ATA firmware erase reports no real percentage. Even if an older
                 # station sends its synthetic 2%, show indeterminate progress while
@@ -643,9 +635,7 @@ def main():
                     },
                     "estimate": {
                         "total_seconds": 3600,
-                        "phases": [
-                            {"phase": "erase", "seconds": 3600, "source": "drive_firmware"}
-                        ],
+                        "phases": [{"phase": "erase", "seconds": 3600, "source": "drive_firmware"}],
                         "notes": ["Drive firmware duration is approximate."],
                     },
                 }
@@ -654,19 +644,19 @@ def main():
                 timing_page.reload()
                 expect(timing_page.locator("#active-percent")).to_have_text("—")
                 expect(timing_page.locator("#progress-bar").locator("..")).to_be_hidden()
-                expect(timing_page.locator("#task-percent")).to_have_text(
-                    "Progress unavailable"
-                )
+                expect(timing_page.locator("#task-percent")).to_have_text("Progress unavailable")
                 expect(timing_page.locator("#task-detail")).to_contain_text(
                     "Firmware erase running; progress unavailable"
                 )
                 expect(timing_page.locator("#task-detail")).to_contain_text("Activity")
                 expect(timing_page.locator("#run-remaining")).to_contain_text("About")
                 expect(timing_page.locator("#run-eta")).to_contain_text("About")
-                expect(timing_page.locator("#cancel-button")).to_be_hidden()
-                timing_page.locator(
-                    '#run-list [data-run-id="fixture-firmware-erase"]'
-                ).click()
+                expect(timing_page.locator("#cancel-button")).to_be_visible()
+                expect(timing_page.locator("#cancel-button")).to_be_disabled()
+                expect(timing_page.locator("#cancel-help")).to_contain_text(
+                    "cannot be cancelled safely"
+                )
+                timing_page.locator('#run-list [data-run-id="fixture-firmware-erase"]').click()
                 expect(timing_page.locator("#report")).to_contain_text(
                     "Unavailable (firmware managed)"
                 )
@@ -685,9 +675,7 @@ def main():
                 }
                 firmware_run["task"]["last_update_at"] = datetime.now(UTC).isoformat()
                 timing_page.reload()
-                expect(timing_page.locator("#run-remaining")).to_have_text(
-                    "Estimate unavailable"
-                )
+                expect(timing_page.locator("#run-remaining")).to_have_text("Estimate unavailable")
                 expect(timing_page.locator("#run-eta")).to_have_text("Estimate unavailable")
                 expect(timing_page.locator("#task-warning")).to_contain_text(
                     "completion time is unavailable"
@@ -701,9 +689,7 @@ def main():
                 firmware_run["task"]["started_at"] = firmware_run["started_at"]
                 timing_page.reload()
                 expect(timing_page.locator("#active-percent")).to_have_text("—")
-                expect(timing_page.locator("#run-remaining")).to_have_text(
-                    "Estimate unavailable"
-                )
+                expect(timing_page.locator("#run-remaining")).to_have_text("Estimate unavailable")
 
                 firmware_run["status"] = "queued"
                 firmware_run["phase"] = "queued"
@@ -713,6 +699,14 @@ def main():
                 expect(timing_page.locator("#active-detail")).to_have_text(
                     "Firmware erase queued; progress unavailable."
                 )
+                expect(timing_page.locator("#cancel-button")).to_be_enabled()
+                expect(timing_page.locator("#cancel-button")).to_have_text("Cancel erase")
+                firmware_run.update(
+                    status="running", erase_method="full_overwrite", profile="full_erase"
+                )
+                timing_page.reload()
+                expect(timing_page.locator("#cancel-button")).to_be_enabled()
+                expect(timing_page.locator("#cancel-help")).to_contain_text("does not restore data")
 
                 timing_state["runs"] = [timed_run]
                 timing_state["system"]["active_run_id"] = timed_run["id"]
@@ -723,7 +717,9 @@ def main():
                         "workflow_status": "awaiting_action",
                         "progress": 100,
                         "lifecycle": {
-                            "action_deadline": (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+                            "action_deadline": (
+                                datetime.now(UTC) + timedelta(seconds=30)
+                            ).isoformat()
                         },
                     }
                 )
@@ -746,9 +742,7 @@ def main():
                 timing_state["system"]["active_run_id"] = "fixture-new-window"
                 timing_page.evaluate("refreshState()")
                 timing_page.get_by_role("button", name="Start Extended", exact=True).click()
-                expect(timing_page.locator("#estimate-error")).to_contain_text(
-                    "different drive"
-                )
+                expect(timing_page.locator("#estimate-error")).to_contain_text("different drive")
                 assert action_calls == []
 
                 # A server-side expiry after a correctly bound confirmation remains

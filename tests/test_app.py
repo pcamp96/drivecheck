@@ -417,3 +417,24 @@ def test_estimate_api_is_authenticated_read_only_and_profile_checked(tmp_path):
         assert response.json()["total_seconds"] > 0
         assert client.get("/api/state", headers=AUTH).json()["runs"] == []
         assert client.get("/api/drives/missing/test-estimate", headers=AUTH).status_code == 409
+
+
+def test_cancel_api_auth_missing_run_and_firmware_conflict(tmp_path):
+    application = app(tmp_path)
+    with TestClient(application) as client:
+        path = "/api/runs/missing/cancel"
+        assert client.post(path).status_code == 401
+        assert client.post(path, headers=AUTH).status_code == 404
+        run = {"id": "firmware", "created_at": "2026-10-05", "status": "running"}
+        client.portal.call(application.state.engine.store.save, run)
+        application.state.engine.active_run_id = "firmware"
+        application.state.engine.hardware.firmware_erase_active = True
+        response = client.post("/api/runs/firmware/cancel", headers=AUTH)
+        assert response.status_code == 409
+        assert "Firmware erase" in response.json()["detail"]
+        assert (
+            client.portal.call(application.state.engine.store.get, "firmware")["status"]
+            == "running"
+        )
+        application.state.engine.active_run_id = None
+        application.state.engine.hardware.firmware_erase_active = False
