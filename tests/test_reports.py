@@ -1,9 +1,9 @@
 from drivecheck.reports import failure_reason, human_report
 
 
-def lucy_failure_run():
+def failed_self_test_run():
     return {
-        "id": "run-lucy",
+        "id": "run-failed-self-test",
         "status": "failed",
         "detail": "A drive check failed.",
         "profile": "extended",
@@ -11,7 +11,7 @@ def lucy_failure_run():
         "finished_at": "2026-10-03T12:00:00Z",
         "drive": {
             "model": "WDC WD40EFRX",
-            "serial": "WD-WCC4E5PX43ZV",
+            "serial": "FIXTURE-FAILED-DRIVE",
             "size_bytes": 4_000_787_030_016,
         },
         "lifecycle": {
@@ -77,7 +77,7 @@ def lucy_failure_run():
 
 
 def test_failure_reason_uses_current_self_test_lba_and_cause():
-    reason = failure_reason(lucy_failure_run())
+    reason = failure_reason(failed_self_test_run())
     assert (
         reason
         == "Drive self-test failed: the drive could not read part of its surface (read failure) at LBA 622,728."
@@ -85,7 +85,7 @@ def test_failure_reason_uses_current_self_test_lba_and_cause():
 
 
 def test_human_report_distinguishes_current_and_historical_evidence():
-    report = human_report(lucy_failure_run())
+    report = human_report(failed_self_test_run())
     assert "VERDICT: FAILED" in report
     assert "CAUSE: Drive self-test failed: the drive could not read part of its surface" in report
     assert "This run: Extended offline: Completed: read failure; failing LBA 622,728" in report

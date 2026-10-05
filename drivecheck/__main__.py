@@ -38,7 +38,7 @@ def main():
     if config.headless and config.demo:
         parser.error("Headless mode requires --hardware (or DRIVECHECK_DEMO=false)")
     if not config.demo and platform.system() not in {"Linux", "Darwin"}:
-        parser.error("Hardware mode supports Linux and macOS. Use --demo on this computer.")
+        parser.error("Hardware mode supports Linux and macOS. Use --demo for simulation.")
     from drivecheck.app import create_app
 
     app = create_app(config)

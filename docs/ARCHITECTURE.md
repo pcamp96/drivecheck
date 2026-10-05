@@ -1,7 +1,7 @@
-# Implementation contract
+# Architecture and API
 
-Working name: DriveCheck. Native systemd service on Raspberry Pi OS Bookworm or
-newer (64-bit, Python 3.11+). Portable demo mode never probes host hardware.
+DriveCheck runs as a native systemd service on Debian-based Linux, including
+Raspberry Pi OS Bookworm or newer (64-bit, Python 3.11+). Portable demo mode never probes host hardware.
 One application process; one test job at a time; SQLite persists snapshots.
 
 ## Hardware interface (hardware.py)

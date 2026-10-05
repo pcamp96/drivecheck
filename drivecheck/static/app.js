@@ -254,7 +254,7 @@ function renderStation() {
   const isDemo = snapshot.mode === "demo";
   const capabilities = snapshot.system?.capabilities || {};
   elements.mode.textContent = isDemo ? "Simulated drives · no hardware access" : `${snapshot.system?.platform || "Hardware"} · ${snapshot.settings?.headless ? "Headless intake" : "Hardware mode"}`;
-  elements.platformNotice.textContent = isDemo ? "This preview uses simulated drives. Start with --hardware to discover attached external drives." : (capabilities.limitations || []).join(" ");
+  elements.platformNotice.textContent = isDemo ? "Simulation mode uses synthetic drives and test results. Start with --hardware to discover attached external drives." : (capabilities.limitations || []).join(" ");
   elements.mode.classList.toggle("demo", isDemo);
   elements.connection.replaceChildren();
   const dot = document.createElement("span");

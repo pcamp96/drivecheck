@@ -1,27 +1,30 @@
-# Physical acceptance test — Monday, October 5, 2026
+# Hardware validation checklist
 
 Keep the first test on a spare drive whose contents aren't needed. Record the
 Pi model, OS version, power supply, USB dock model, drive model/serial and tool
-versions beside exported reports. These are article evidence, not simulated
-performance claims.
+versions beside exported reports. Validate each new station, adapter, or drive
+combination; simulated tests do not establish physical compatibility.
 
 1. Install the service and sign in through SSH forwarding. Confirm **Hardware
    mode**, tools present, boot disk blocked, USB target serial/capacity correct.
 2. With a partition mounted on the USB drive, check that testing is blocked.
    Unmount it and rescan. Ensure desktop automount is disabled before real I/O.
-3. Run **Quick**. Confirm SMART data is from the target drive and fio measures
-   reads; download the report. Confirm fio can open the device while DriveCheck
-   holds its exclusive block-device claim, and confirm the full scan reports
-   coverage equal to the disk capacity including its final sectors. Validate
+3. Run **Quick**. Confirm SMART data is from the target drive, the newly requested
+   short self-test completes, and fio measures a read sample. Download the report.
+   Confirm fio can open the device while DriveCheck holds its exclusive Linux
+   block-device claim. Quick does not scan the entire surface. Validate that
    file/partition contents remain intact.
 4. Run **Extended**. Confirm the new extended self-test reaches completion and
-   full read scan covers the drive. Capture elapsed time and dashboard updates
+   full read scan covers the entire accessible capacity including final sectors.
+   Check the duration estimate before starting, and the task progress, remaining
+   time, and ETA during testing. Capture elapsed time and dashboard updates
    from a second browser. Refresh/reconnect during the job; it should continue.
 5. Cancel an extended test. Verify the app reports cancelled and the hardware
    process/self-test stops before disconnecting. Then run another Quick test.
 6. Enable automatic intake. Plug in a second eligible drive. Confirm one
-   read-only Extended job queues; only one drive runs at once. Rescan repeatedly
-   and check that no duplicate job appears. Disable automation after checking.
+   read-only Quick job queues; only one drive runs at once. Rescan repeatedly
+   and check that no duplicate job appears. Restore your desired automation
+   settings after checking.
 7. Configure your chosen notification provider. Press the test-message button;
    restart the service and confirm the station-ready message arrives before docking
    a drive, then run a test and confirm the completion message reaches the intended destination.
@@ -50,8 +53,11 @@ and adapter model. Exclude tokens, notification settings, and private account da
   Unsupported USB SMART must leave coverage incomplete. Writes must stay disabled.
 - On the Pi, use a single-bay dock and configure an enabled provider, then enable
   headless mode. Close the dashboard. Dock an unmounted spare drive and confirm
-  one read-only Extended test, a result message, safe power-off, and a separate
-  ready-to-remove message. Verify report lifecycle matches actual hardware state.
+  one read-only Quick test and a result message. For a passed/warning drive,
+  confirm the 180-second action window offers Extended and Eject. Let it expire
+  and verify safe power-off and a separate **Safe to remove** message. Verify the
+  report lifecycle matches actual hardware state. Repeat with **Eject now** and
+  **Run Extended**; a failed or incomplete test should skip the action window.
 - Repeat with notification delivery temporarily unavailable: the report is saved,
   delivery stays queued and eject proceeds after the bounded wait. Restore network
   and confirm eventual notices without false readiness.
