@@ -244,6 +244,17 @@ async def test_reconnected_new_path_can_confirm_erase_but_buttons_remain_one_use
             for row in markup["inline_keyboard"]
             for button in row
         )
+        erase_rows = [
+            row
+            for row in markup["inline_keyboard"]
+            if any(
+                button.get("callback_data", "").endswith(
+                    (":quick_erase", ":initialize_disk", ":secure_erase", ":full_erase")
+                )
+                for button in row
+            )
+        ]
+        assert len(erase_rows) == 4 and all(len(row) == 1 for row in erase_rows)
         intent = await engine.begin_erase(nonce, "quick_erase", chat_id=42, user_id=42)
         assert engine.erase_intents[intent["intent_id"]]["drive"]["path"] == "/dev/new-path"
         result = await engine.confirm_erase(

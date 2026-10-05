@@ -1419,19 +1419,14 @@ class Engine:
                 )
             )
         ):
-            rows.append(
-                [
-                    {"text": "Quick erase", "callback_data": f"dc:{run_id}:quick_erase"},
-                    {
-                        "text": "Initialize/reset disk",
-                        "callback_data": f"dc:{run_id}:initialize_disk",
-                    },
-                    {
-                        "text": "Firmware secure erase",
-                        "callback_data": f"dc:{run_id}:secure_erase",
-                    },
-                    {"text": "Full erase", "callback_data": f"dc:{run_id}:full_erase"},
-                ]
+            rows.extend(
+                [{"text": label, "callback_data": f"dc:{run_id}:{action}"}]
+                for label, action in (
+                    ("Quick erase", "quick_erase"),
+                    ("Initialize/reset disk", "initialize_disk"),
+                    ("Firmware secure erase", "secure_erase"),
+                    ("Full erase", "full_erase"),
+                )
             )
         if (
             controls_authorized

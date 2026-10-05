@@ -326,12 +326,30 @@ async def test_manual_quick_receives_same_action_window_and_buttons(tmp_path):
         assert run["extended_estimate"]["minimum_seconds"] > 0
         assert hardware.ejected == 0
         engine.settings.value["notifications"].update(provider="telegram", telegram_chat_id="123")
+        engine.config.allow_destructive = True
+        engine.capabilities["can_erase"] = True
         markup = engine.telegram_markup(f"{run['id']}:finished")
         actions = [
             button.get("callback_data", "") for row in markup["inline_keyboard"] for button in row
         ]
         assert f"dc:{run['id']}:extended" in actions
         assert f"dc:{run['id']}:eject" in actions
+        erase_rows = [
+            row
+            for row in markup["inline_keyboard"]
+            if any(
+                button.get("callback_data", "").endswith(
+                    (":quick_erase", ":initialize_disk", ":secure_erase", ":full_erase")
+                )
+                for button in row
+            )
+        ]
+        assert [[button["text"] for button in row] for row in erase_rows] == [
+            ["Quick erase"],
+            ["Initialize/reset disk"],
+            ["Firmware secure erase"],
+            ["Full erase"],
+        ]
         await engine.choose_action(run["id"], "eject")
         await asyncio.wait_for(engine.queue.join(), 1)
         assert hardware.ejected == 1
