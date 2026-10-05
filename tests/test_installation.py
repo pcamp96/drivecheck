@@ -72,7 +72,7 @@ def test_reinstall_and_default_uninstall_preserve_config_and_data(tmp_path):
     )
     initial = config.read_text()
     assert "DRIVECHECK_HEADLESS=false" in initial
-    assert "DRIVECHECK_ALLOW_DESTRUCTIVE=false" in initial
+    assert "DRIVECHECK_ALLOW_DESTRUCTIVE=true" in initial
     assert (root / "opt/drivecheck/LICENSE").is_file()
     assert (root / "opt/drivecheck/README.md").is_file()
     manifest = root / "etc/drivecheck/install-manifest"
@@ -201,5 +201,7 @@ exit 0""",
 
 
 def test_shell_scripts_parse():
-    for name in ("install-linux.sh", "install-pi.sh", "uninstall-linux.sh"):
+    subprocess.run(["bash", "-n", str(ROOT / "install.sh")], check=True)
+    for name in ("install-linux.sh", "install-pi.sh", "uninstall-linux.sh", "install-macos.sh", "uninstall-macos.sh"):
         subprocess.run(["bash", "-n", str(ROOT / "scripts" / name)], check=True)
+    subprocess.run(["bash", "-n", str(ROOT / "deploy/run-macos.sh")], check=True)

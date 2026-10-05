@@ -169,7 +169,7 @@ async def test_telegram_keyboard_grants_and_expired_notice_without_provider_io(t
         buttons = markup["inline_keyboard"]
         assert buttons[0][0]["callback_data"] == f"dc:{run['id']}:extended"
         assert buttons[0][1]["callback_data"] == f"dc:{run['id']}:eject"
-        token = parse_qs(urlsplit(buttons[1][0]["url"]).fragment)["access"][0]
+        token = parse_qs(urlsplit(buttons[-1][0]["url"]).fragment)["access"][0]
         assert engine.access_links.redeem(token) == run["id"]
         assert token not in str(engine.state())
         engine.settings.value["notifications"]["provider"] = "discord"
@@ -254,7 +254,7 @@ async def test_group_buttons_require_sender_but_never_share_sign_in_grants(tmp_p
         notice.update(provider="telegram", telegram_chat_id="-123", telegram_user_id="456")
         rows = engine.telegram_markup(f"{run['id']}:finished")["inline_keyboard"]
         assert rows[0][0]["callback_data"].endswith(":extended")
-        assert rows[1][0]["url"] == "https://station.test"
+        assert rows[-1][0]["url"] == "https://station.test"
         assert not engine.access_links._links
         notice["telegram_user_id"] = ""
         rows = engine.telegram_markup(f"{run['id']}:finished")["inline_keyboard"]

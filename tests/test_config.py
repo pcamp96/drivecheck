@@ -5,6 +5,19 @@ import pytest
 from drivecheck.config import Config, Settings
 
 
+def test_manual_destructive_actions_default_enabled_but_can_be_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("DRIVECHECK_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("DRIVECHECK_ALLOW_DESTRUCTIVE", raising=False)
+    assert Config(tmp_path).allow_destructive
+    config = Config.from_env()
+    assert config.allow_destructive
+    settings = Settings(config).public()
+    assert settings["allow_destructive"]
+    assert not settings["auto_test"]
+    monkeypatch.setenv("DRIVECHECK_ALLOW_DESTRUCTIVE", "false")
+    assert not Config.from_env().allow_destructive
+
+
 def test_environment_notifications_redacted_and_managed(tmp_path, monkeypatch):
     monkeypatch.setenv("DRIVECHECK_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("DRIVECHECK_NOTIFICATION_PROVIDER", "telegram")

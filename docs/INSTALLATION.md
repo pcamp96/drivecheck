@@ -9,26 +9,33 @@ dock with SMART passthrough, and separate boot storage. Install a supported
 64-bit OS with Python 3.11+, network access, and an account with `sudo` privileges.
 The native installer supports Debian-based systems with APT and systemd.
 
-Run these commands **on the station**, over SSH or in its terminal. Clone the
-repository into any directory you choose; no particular home-directory layout
-is required:
+Run these commands **on the station**, over SSH or in its terminal:
 
 ```sh
-sudo apt-get update
-sudo apt-get install -y git
-git clone https://github.com/pcamp96/drivecheck.git
-cd drivecheck
-sudo bash scripts/install-linux.sh
+curl -fsSL https://raw.githubusercontent.com/pcamp96/drivecheck/main/install.sh -o install-drivecheck.sh
+sudo bash install-drivecheck.sh
 sudo systemctl status drivecheck
 sudo cat /var/lib/drivecheck/access-token
 ```
 
-The installer installs the required system tools and locked Python dependencies
-into `/opt/drivecheck/.venv`, then enables the `drivecheck` systemd service at boot.
-You do not need `uv` or development dependencies for this installation.
-Configuration lives in `/etc/drivecheck/drivecheck.env`; private settings, reports,
-and the generated sign-in token live in `/var/lib/drivecheck`. Rerunning the
-installer preserves station settings. `scripts/install-pi.sh` is an alias.
+If `curl` is missing, install it with `sudo apt-get install curl ca-certificates`.
+The single bootstrap file resolves a GitHub revision, downloads its source,
+installs the native station, and removes its temporary download. Git and `uv`
+are not needed. Tools and locked Python dependencies live in
+`/opt/drivecheck/.venv`; the systemd service starts at boot.
+Configuration lives in `/etc/drivecheck/drivecheck.env`; private settings,
+reports, and the sign-in token live in `/var/lib/drivecheck`.
+Rerunning the installer preserves these files and refuses to interrupt queued
+or active tests and pending safe release.
+
+Installer options:
+
+- `--no-start`: install the boot-time service, leaving it stopped for configuration.
+- `--ref TAG_OR_COMMIT`: install a specific branch, tag, or full commit SHA.
+- `--dry-run`: resolve the revision and show the plan without installing.
+
+A source checkout still supports `sudo bash scripts/install-linux.sh`;
+`scripts/install-pi.sh` is an alias for that native installer.
 
 The service runs as root because raw block I/O and SMART ioctls require device
 permissions. Its dashboard listens on loopback by default. From a **separate
@@ -48,45 +55,48 @@ not forward the service port to the internet. For a TLS reverse proxy set
 `DRIVECHECK_PUBLIC_ORIGIN` to its exact HTTPS origin and
 `DRIVECHECK_SECURE_COOKIE=true`; the app does not trust forwarded headers.
 
-## Use on macOS
+## Install on macOS
 
-Install Python 3.11+, [uv](https://docs.astral.sh/uv/), and the I/O tools
-(`brew install fio smartmontools` when using Homebrew). Clone the repository into
-any directory, then create its virtual environment:
-
-```sh
-git clone https://github.com/pcamp96/drivecheck.git
-cd drivecheck
-uv sync --locked
-uv run --locked drivecheck --hardware
-```
-
-This launch supports inventory without root. Open <http://127.0.0.1:8765> and use
-the token in `data/access-token`. The dashboard explains missing tools and
-permissions. Stop this process with Ctrl+C before launching a privileged testing
-station from the same checkout:
+Install [Homebrew](https://brew.sh) first. A working `python3` (3.8+) is needed
+to unpack the download; Homebrew's installer prerequisites normally provide
+Apple's Python. The DriveCheck installer adds Homebrew Python 3.13, `fio`, and
+`smartmontools`. Run it as your normal user, **without sudo**, so Homebrew can
+install its packages. It requests sudo for the station service:
 
 ```sh
-sudo env PATH="$PATH" "$PWD/.venv/bin/drivecheck" --hardware --data-dir /var/db/drivecheck
-```
-
-Leave that process running. In another terminal, read its sign-in token:
-
-```sh
+curl -fsSL https://raw.githubusercontent.com/pcamp96/drivecheck/main/install.sh -o install-drivecheck.sh
+bash install-drivecheck.sh
 sudo cat /var/db/drivecheck/access-token
 ```
 
-Use that station's token at <http://127.0.0.1:8765>. Close files and applications
-using the target, then choose **Unmount for testing**; busy volumes are refused.
-Quick and Extended use raw reads. Destructive operations are disabled because
-macOS cannot provide Linux's exclusive block-device claim. Mount state and
-identity are checked throughout the test; use a dedicated dock and avoid mounting
-the disk during a run. Unsupported USB SMART produces incomplete coverage.
-Normal eject uses `diskutil eject`; internal, system-backed, virtual, ambiguous,
-and unidentified disks remain blocked.
+Open <http://127.0.0.1:8765> and sign in with that token. The native launchd
+service starts at boot, with no terminal left open. The app lives in
+`/opt/drivecheck`, configuration in `/etc/drivecheck/drivecheck.env`, and private
+settings/reports in `/var/db/drivecheck`. It supports the same installer options
+and preserves configuration on updates.
 
-The systemd installer is Linux-only. The macOS commands above run in the
-foreground; they do not install a boot-time service.
+```sh
+sudo launchctl print system/org.drivecheck.station
+sudo tail -f /var/db/drivecheck/station-error.log
+```
+
+With `--no-start`, start it after configuration using:
+
+```sh
+sudo launchctl bootstrap system /Library/LaunchDaemons/org.drivecheck.station.plist
+```
+
+Close files and applications using the target, then choose **Unmount for
+testing**; busy volumes are refused. Quick and Extended use raw reads. Manual
+Quick format, disk initialization, and full overwrite require confirmation.
+The firmware Secure Erase command and Linux RAID takeover are unavailable on
+macOS. Unsupported USB SMART produces incomplete coverage. macOS does not offer
+Linux's block-device exclusion; fresh identity and mount checks still apply.
+Use a dedicated dock and avoid mounting the disk during a job. Internal,
+system-backed, virtual, ambiguous, and unidentified disks remain blocked.
+
+For development or a foreground launch, see [Contributing](../CONTRIBUTING.md).
+Stop the installed service before running another process on its data directory.
 
 ## Try the simulation
 
@@ -107,21 +117,14 @@ are marked simulated. Configured notifications still send **real messages** when
 you press Send test notification or enable notices. Stop the process with Ctrl+C.
 Windows supports this mode only.
 
-## Update a Linux station
+## Update a station
 
-Wait for all tests and safe-eject work to finish before updating. In the source
-checkout used for installation, run:
-
-```sh
-sudo systemctl stop drivecheck
-git pull --ff-only
-sudo bash scripts/install-linux.sh
-sudo systemctl status drivecheck
-```
-
-The installer preserves configuration, saved settings, reports, and the access
-token. Do not restart during an erase operation. Interrupted tests are marked
-incomplete; neither tests nor erase jobs resume automatically.
+Wait for tests and safe release to finish, then download and rerun the same
+installer commands for your OS. You do not need a source checkout or `git pull`.
+The downloaded revision is recorded in `/opt/drivecheck/DEPLOYED_REVISION`.
+The installer preserves configuration, settings, reports, and the access token,
+and refuses updates while unfinished work is recorded. Interrupted tests and
+erase jobs never resume automatically.
 
 ## Reports and operations
 
@@ -131,13 +134,18 @@ selected profile, coverage, identity, timestamps, and a simulation flag.
 The dashboard displays the newest 200 runs; older reports remain in SQLite and
 are available by their run ID. The result view exposes raw detail alongside key speed.
 
+On Linux:
+
 ```sh
 sudo journalctl -u drivecheck -f
 sudo systemctl restart drivecheck
 sudo systemctl stop drivecheck
 ```
 
-Back up `/var/lib/drivecheck` **while the service is stopped**, including settings,
+On macOS, stop with `sudo launchctl bootout system/org.drivecheck.station` and
+start with the `launchctl bootstrap` command above. Logs live in `/var/db/drivecheck`.
+
+Back up the platform data directory **while the service is stopped**, including settings,
 SQLite, and the access token. Keep that directory private. To rotate the generated
 access token, stop the service, remove only `access-token`, and restart. Sessions
 expire after 12 hours or a service restart. There must be one process/one worker
@@ -145,24 +153,27 @@ per data directory; a filesystem lock enforces this.
 
 ## Uninstall or reinstall
 
-The Linux installer adds a removal command:
+Both native installers add a removal command:
 
 ```sh
-sudo drivecheck-uninstall
+sudo /usr/local/sbin/drivecheck-uninstall
 ```
 
 It stops/disables the service and removes the application, its private Python
 environment, service unit, and uninstall command. It preserves
-`/etc/drivecheck` and `/var/lib/drivecheck`, including settings, reports and the
+`/etc/drivecheck` and the platform data directory (`/var/lib/drivecheck` on Linux,
+`/var/db/drivecheck` on macOS), including settings, reports and the
 sign-in token, so reinstalling can restore the station. To also permanently
 remove those DriveCheck settings and reports, explicitly run:
 
 ```sh
-sudo drivecheck-uninstall --purge-data
+sudo /usr/local/sbin/drivecheck-uninstall --purge-data
 ```
 
-Shared APT dependencies, system journal entries, and your source checkout remain
-installed. The installation manifest records packages that DriveCheck added.
+Shared APT/Homebrew dependencies and existing system logs remain. Any source
+checkout you created is retained. The Linux installation manifest records added
+packages.
 The uninstaller refuses unmanaged or symbolic-link installation paths. If the
 command has already been removed, run `sudo bash scripts/uninstall-linux.sh`
-from the source checkout. Stop active tests before uninstalling.
+from a source checkout (or `scripts/uninstall-macos.sh` on macOS).
+Stop active tests before uninstalling.

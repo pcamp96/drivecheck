@@ -26,7 +26,7 @@ def atomic_json(path: Path, value: dict) -> None:
 class Config:
     data_dir: Path
     demo: bool = True
-    allow_destructive: bool = False
+    allow_destructive: bool = True
     scan_interval: float = 5
     api_key: str = ""
     public_origin: str = ""
@@ -54,7 +54,7 @@ class Config:
         return cls(
             data_dir=Path(os.getenv("DRIVECHECK_DATA_DIR", "data")).expanduser().resolve(),
             demo=boolean(os.getenv("DRIVECHECK_DEMO"), True),
-            allow_destructive=boolean(os.getenv("DRIVECHECK_ALLOW_DESTRUCTIVE")),
+            allow_destructive=boolean(os.getenv("DRIVECHECK_ALLOW_DESTRUCTIVE"), True),
             scan_interval=max(1, float(os.getenv("DRIVECHECK_SCAN_INTERVAL", "5"))),
             api_key=os.getenv("DRIVECHECK_API_KEY", ""),
             public_origin=os.getenv("DRIVECHECK_PUBLIC_ORIGIN", "").rstrip("/"),

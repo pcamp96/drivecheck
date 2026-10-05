@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import plistlib
 from collections import deque
@@ -7,7 +8,7 @@ from contextlib import nullcontext
 
 import pytest
 
-from drivecheck.hardware import CommandResult, Drive
+from drivecheck.hardware import CommandResult, Drive, SafetyError
 from drivecheck.macos import MacHardware
 
 
@@ -28,6 +29,25 @@ class PlistRunner:
 
     async def cancel(self) -> None:
         pass
+
+
+class DelayedRunner:
+    def __init__(self, response: CommandResult, delay: float = 0.02) -> None:
+        self.response = response
+        self.delay = delay
+        self.calls: list[tuple[str, ...]] = []
+        self.cancelled = False
+
+    async def run(self, *args: str, **kwargs: object) -> CommandResult:
+        self.calls.append(args)
+        await asyncio.sleep(self.delay)
+        callback = kwargs.get("stdout_chunk")
+        if callback:
+            await callback(self.response.stdout)
+        return self.response
+
+    async def cancel(self) -> None:
+        self.cancelled = True
 
 
 def plist_result(payload: object, returncode: int = 0) -> CommandResult:
@@ -241,36 +261,490 @@ async def test_macos_fio_is_readonly_posixaio_on_raw_device() -> None:
     command = operation.calls[0]
     assert "--filename=/dev/rdisk4" in command
     assert "--ioengine=posixaio" in command
+    assert "--direct=1" not in command
     assert "--readonly" in command
 
 
 @pytest.mark.asyncio
-async def test_destructive_surface_is_always_unsupported() -> None:
+async def test_macos_full_erase_writes_and_verifies_entire_raw_device() -> None:
     hardware = MacHardware(demo=False)
+    hardware._discovery_runner = PlistRunner(inventory() * 5)
+    raw = {
+        "jobs": [
+            {
+                "error": 0,
+                "read": {"io_bytes": 1_000_000_000},
+                "write": {"io_bytes": 1_000_000_000},
+            }
+        ]
+    }
+    operation = PlistRunner([CommandResult(("fio",), 0, json.dumps(raw), "")])
+    hardware._runner = operation
+    drive = (await hardware.discover())[0]
 
-    async def progress(_: int, __: str) -> None:
+    async def progress(_: float | None, __: str) -> None:
         pass
 
-    drive = Drive(
+    report = await hardware.surface(drive, progress, destructive=True)
+
+    assert report["status"] == "passed"
+    command = operation.calls[0]
+    assert "--filename=/dev/rdisk4" in command
+    assert "--ioengine=posixaio" in command
+    assert "--direct=1" not in command
+    assert "--rw=write" in command
+    assert "--verify=sha256" in command
+    assert "--do_verify=1" in command
+    assert "--readonly" not in command
+
+
+@pytest.mark.asyncio
+async def test_macos_full_erase_stops_when_disk_arbitration_remounts_drive() -> None:
+    hardware = MacHardware(demo=False)
+    hardware.io_safety_poll_seconds = 0.001
+    hardware._discovery_runner = PlistRunner(inventory() * 4 + inventory(mounted=True))
+    raw = {
+        "jobs": [
+            {
+                "error": 0,
+                "read": {"io_bytes": 1_000_000_000},
+                "write": {"io_bytes": 1_000_000_000},
+            }
+        ]
+    }
+    operation = DelayedRunner(CommandResult(("fio",), 0, json.dumps(raw), ""))
+    hardware._runner = operation
+    drive = (await hardware.discover())[0]
+
+    async def progress(_: float | None, __: str) -> None:
+        pass
+
+    report = await hardware.surface(drive, progress, destructive=True)
+
+    assert report["status"] == "incomplete"
+    assert "mounted" in report["detail"]
+    assert operation.cancelled is True
+
+
+def test_capabilities_offer_manual_destructive_features(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("drivecheck.macos.shutil.which", lambda _: "/tool")
+    monkeypatch.setattr("drivecheck.macos.os.geteuid", lambda: 0)
+    report = MacHardware(demo=False).capabilities()
+    assert report["platform"] == "macos"
+    assert report["can_test"] is True
+    assert report["can_verify"] is True
+    assert report["can_erase"] is True
+
+
+@pytest.mark.asyncio
+async def test_erase_plan_lists_data_partition_and_keeps_firmware_erase_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = MacHardware(demo=False)
+    drive = (await _drive_from_inventory(hardware))[0]
+    hardware._discovery_runner = PlistRunner(
+        inventory()
+        + [
+            plist_result(
+                {
+                    "AllDisksAndPartitions": [
+                        {
+                            "DeviceIdentifier": "disk4",
+                            "Partitions": [
+                                {
+                                    "DeviceIdentifier": "disk4s1",
+                                    "Size": 209_715_200,
+                                    "Content": "EFI",
+                                    "PartitionMapPartitionOffset": 20_480,
+                                },
+                                {
+                                    "DeviceIdentifier": "disk4s2",
+                                    "Size": 790_000_000,
+                                    "Content": "Microsoft Basic Data",
+                                    "VolumeName": "Archive",
+                                    "PartitionMapPartitionOffset": 209_735_680,
+                                },
+                            ],
+                        }
+                    ]
+                }
+            ),
+            plist_result(
+                {
+                    "DeviceIdentifier": "disk4s1",
+                    "ParentWholeDisk": "disk4",
+                    "PartitionMapPartitionOffset": 20_480,
+                    "DiskUUID": "EFI-UUID",
+                }
+            ),
+            plist_result(
+                {
+                    "DeviceIdentifier": "disk4s2",
+                    "ParentWholeDisk": "disk4",
+                    "PartitionMapPartitionOffset": 209_735_680,
+                    "DiskUUID": "DATA-UUID",
+                }
+            ),
+        ]
+    )
+    monkeypatch.setattr("drivecheck.macos.os.geteuid", lambda: 0)
+    monkeypatch.setattr("drivecheck.macos.shutil.which", lambda _: "/tool")
+
+    plan = await hardware.erase_plan(drive)
+
+    assert [target["path"] for target in plan["quick"]["targets"]] == ["/dev/disk4s2"]
+    assert plan["initialize"]["available"] is True
+    assert plan["full"]["available"] is True
+    assert plan["secure"]["available"] is False
+    assert "unavailable" in plan["secure"]["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_quick_format_excludes_apfs_containers_and_apple_raid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = MacHardware(demo=False)
+    drive = _fixture_drive()
+
+    async def records(_: Drive) -> list[dict]:
+        return [
+            {
+                "id": "apfs",
+                "path": "/dev/disk4s1",
+                "size_bytes": 300_000_000,
+                "start_offset": 20_480,
+                "partuuid": "APFS-STORE",
+                "content": "Apple_APFS",
+                "label": "Container disk5 with multiple volumes",
+            },
+            {
+                "id": "raid",
+                "path": "/dev/disk4s2",
+                "size_bytes": 300_000_000,
+                "start_offset": 300_020_480,
+                "partuuid": "RAID-MEMBER",
+                "content": "Apple_RAID",
+                "label": "RAID member",
+            },
+            {
+                "id": "ordinary",
+                "path": "/dev/disk4s3",
+                "size_bytes": 300_000_000,
+                "start_offset": 600_020_480,
+                "partuuid": "DATA-PARTITION",
+                "content": "Microsoft Basic Data",
+                "label": "Ordinary volume",
+            },
+        ]
+
+    monkeypatch.setattr(hardware, "_partition_records", records)
+
+    targets = await hardware._format_targets(drive)
+
+    assert [target["id"] for target in targets] == ["ordinary"]
+
+
+@pytest.mark.asyncio
+async def test_quick_format_target_id_changes_when_partition_moves() -> None:
+    hardware = MacHardware(demo=False)
+
+    def partition_map(offset: int) -> dict:
+        return {
+            "AllDisksAndPartitions": [
+                {
+                    "DeviceIdentifier": "disk4",
+                    "Partitions": [
+                        {
+                            "DeviceIdentifier": "disk4s1",
+                            "Size": 900_000_000,
+                            "Content": "Microsoft Basic Data",
+                            "PartitionMapPartitionOffset": offset,
+                        }
+                    ],
+                }
+            ]
+        }
+
+    def partition_info(offset: int) -> dict:
+        return {
+            "DeviceIdentifier": "disk4s1",
+            "ParentWholeDisk": "disk4",
+            "PartitionMapPartitionOffset": offset,
+            "DiskUUID": "PARTITION-UUID",
+        }
+
+    hardware._discovery_runner = PlistRunner(
+        [
+            plist_result(partition_map(100_000)),
+            plist_result(partition_info(100_000)),
+            plist_result(partition_map(200_000)),
+            plist_result(partition_info(200_000)),
+        ]
+    )
+    drive = _fixture_drive()
+
+    before = await hardware._format_targets(drive)
+    after = await hardware._format_targets(drive)
+
+    assert before[0]["id"] != after[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_quick_format_targets_only_selected_partition_and_unmounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = MacHardware(demo=False)
+    drive = _fixture_drive()
+    target = {
+        "id": "selected",
+        "path": "/dev/disk4s2",
+        "size_bytes": 900_000_000,
+        "start_offset": 100_000_000,
+        "partuuid": "DATA-UUID",
+        "filesystem": "Apple_APFS",
+        "label": "Archive",
+    }
+
+    async def validate(current: Drive, destructive: bool = False) -> Drive:
+        assert destructive is True
+        return current
+
+    async def targets(_: Drive) -> list[dict]:
+        return [target]
+
+    async def topology(_: Drive) -> tuple[tuple[object, ...], ...]:
+        return (("/dev/disk4s2", 900_000_000, 100_000_000, "DATA-UUID"),)
+
+    async def plist(*args: str, required: bool) -> dict:
+        assert args == ("diskutil", "info", "-plist", "/dev/disk4s2")
+        assert required is True
+        return {
+            "DeviceIdentifier": "disk4s2",
+            "ParentWholeDisk": "disk4",
+            "FilesystemType": "exfat",
+        }
+
+    monkeypatch.setattr(hardware, "validate", validate)
+    monkeypatch.setattr(hardware, "_format_targets", targets)
+    monkeypatch.setattr(hardware, "_partition_topology", topology)
+    monkeypatch.setattr(hardware, "_plist_command", plist)
+    operation = PlistRunner(
+        [
+            CommandResult(("diskutil",), 0, "Finished erase", ""),
+            CommandResult(("diskutil",), 0, "Unmounted", ""),
+        ]
+    )
+    hardware._runner = operation
+
+    async def progress(_: float | None, __: str) -> None:
+        pass
+
+    report = await hardware._quick_format_exfat(drive, progress, "selected")
+
+    assert report["status"] == "passed"
+    assert operation.calls == [
+        ("diskutil", "eraseVolume", "ExFAT", "DRIVECHECK", "/dev/disk4s2"),
+        ("diskutil", "unmountDisk", "/dev/disk4"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_quick_format_rejects_partition_map_change_before_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = MacHardware(demo=False)
+    drive = _fixture_drive()
+    target = {
+        "id": "selected",
+        "path": "/dev/disk4s2",
+        "size_bytes": 900_000_000,
+        "start_offset": 100_000_000,
+        "partuuid": "DATA-UUID",
+    }
+
+    async def validate(current: Drive, destructive: bool = False) -> Drive:
+        assert destructive is True
+        return current
+
+    async def targets(_: Drive) -> list[dict]:
+        return [target]
+
+    topologies = deque(
+        [
+            (("/dev/disk4s2", 900_000_000, 100_000_000, "DATA-UUID"),),
+            (("/dev/disk4s2", 900_000_000, 200_000_000, "DATA-UUID"),),
+        ]
+    )
+
+    async def topology(_: Drive) -> tuple[tuple[object, ...], ...]:
+        return topologies.popleft()
+
+    monkeypatch.setattr(hardware, "validate", validate)
+    monkeypatch.setattr(hardware, "_format_targets", targets)
+    monkeypatch.setattr(hardware, "_partition_topology", topology)
+    operation = PlistRunner([])
+    hardware._runner = operation
+
+    async def progress(_: float | None, __: str) -> None:
+        pass
+
+    with pytest.raises(SafetyError, match="partition map changed before quick format"):
+        await hardware._quick_format_exfat(drive, progress, "selected")
+    assert operation.calls == []
+
+
+@pytest.mark.asyncio
+async def test_quick_format_rejects_partition_map_change_during_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = MacHardware(demo=False)
+    drive = _fixture_drive()
+    target = {
+        "id": "selected",
+        "path": "/dev/disk4s2",
+        "size_bytes": 900_000_000,
+        "start_offset": 100_000_000,
+        "partuuid": "DATA-UUID",
+    }
+
+    async def validate(current: Drive, destructive: bool = False) -> Drive:
+        assert destructive is True
+        return current
+
+    async def targets(_: Drive) -> list[dict]:
+        return [target]
+
+    topologies = deque(
+        [
+            (("/dev/disk4s2", 900_000_000, 100_000_000, "DATA-UUID"),),
+            (("/dev/disk4s2", 900_000_000, 100_000_000, "DATA-UUID"),),
+            (("/dev/disk4s2", 900_000_000, 200_000_000, "DATA-UUID"),),
+        ]
+    )
+
+    async def topology(_: Drive) -> tuple[tuple[object, ...], ...]:
+        return topologies.popleft()
+
+    async def plist(*args: str, required: bool) -> dict:
+        assert args == ("diskutil", "info", "-plist", "/dev/disk4s2")
+        assert required is True
+        return {
+            "DeviceIdentifier": "disk4s2",
+            "ParentWholeDisk": "disk4",
+            "FilesystemType": "exfat",
+        }
+
+    monkeypatch.setattr(hardware, "validate", validate)
+    monkeypatch.setattr(hardware, "_format_targets", targets)
+    monkeypatch.setattr(hardware, "_partition_topology", topology)
+    monkeypatch.setattr(hardware, "_plist_command", plist)
+    operation = PlistRunner([CommandResult(("diskutil",), 0, "Finished erase", "")])
+    hardware._runner = operation
+
+    async def progress(_: float | None, __: str) -> None:
+        pass
+
+    with pytest.raises(SafetyError, match="partition map changed during quick format"):
+        await hardware._quick_format_exfat(drive, progress, "selected")
+    assert operation.calls == [
+        ("diskutil", "eraseVolume", "ExFAT", "DRIVECHECK", "/dev/disk4s2")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_initialize_replaces_whole_disk_with_gpt_exfat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = MacHardware(demo=False)
+    drive = _fixture_drive()
+    target = {
+        "id": "new-volume",
+        "path": "/dev/disk4s2",
+        "size_bytes": 900_000_000,
+    }
+
+    async def validate(current: Drive, destructive: bool = False) -> Drive:
+        assert destructive is True
+        return current
+
+    async def targets(_: Drive) -> list[dict]:
+        return [target]
+
+    async def plist(*args: str, required: bool) -> dict:
+        assert args == ("diskutil", "info", "-plist", "/dev/disk4s2")
+        assert required is True
+        return {"FilesystemType": "exfat"}
+
+    monkeypatch.setattr(hardware, "validate", validate)
+    monkeypatch.setattr(hardware, "_format_targets", targets)
+    monkeypatch.setattr(hardware, "_plist_command", plist)
+    operation = PlistRunner(
+        [
+            CommandResult(("diskutil",), 0, "Finished erase", ""),
+            CommandResult(("diskutil",), 0, "Unmounted", ""),
+        ]
+    )
+    hardware._runner = operation
+
+    async def progress(_: float | None, __: str) -> None:
+        pass
+
+    report = await hardware._initialize_exfat(drive, progress)
+
+    assert report["status"] == "passed"
+    assert operation.calls[0] == (
+        "diskutil",
+        "eraseDisk",
+        "ExFAT",
+        "DRIVECHECK",
+        "GPT",
+        "/dev/disk4",
+    )
+    assert operation.calls[1] == ("diskutil", "unmountDisk", "/dev/disk4")
+
+
+@pytest.mark.asyncio
+async def test_initialize_revalidates_after_progress_callback_before_erase_disk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hardware = MacHardware(demo=False)
+    drive = _fixture_drive()
+    drifted = False
+
+    async def validate(current: Drive, destructive: bool = False) -> Drive:
+        assert destructive is True
+        if drifted:
+            raise SafetyError("drive identity changed during progress callback")
+        return current
+
+    monkeypatch.setattr(hardware, "validate", validate)
+    operation = PlistRunner([])
+    hardware._runner = operation
+
+    async def progress(_: float | None, __: str) -> None:
+        nonlocal drifted
+        drifted = True
+
+    with pytest.raises(SafetyError, match="identity changed"):
+        await hardware._initialize_exfat(drive, progress)
+    assert operation.calls == []
+
+
+async def _drive_from_inventory(hardware: MacHardware) -> list[Drive]:
+    hardware._discovery_runner = PlistRunner(inventory())
+    return await hardware.discover()
+
+
+def _fixture_drive() -> Drive:
+    return Drive(
         id="fixture",
         path="/dev/rdisk4",
-        model="Fixture",
-        serial="SERIAL",
-        size_bytes=512,
+        model="Fixture Drive",
+        serial="MAC-SERIAL-1",
+        size_bytes=1_000_000_000,
         transport="usb",
         eligible=True,
         reasons=[],
         identity="fixture",
         mounted=False,
     )
-    report = await hardware.surface(drive, progress, destructive=True)
-    assert report["status"] == "unsupported"
-
-
-def test_capabilities_never_offer_destructive_verify(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("drivecheck.macos.shutil.which", lambda _: "/tool")
-    monkeypatch.setattr("drivecheck.macos.os.geteuid", lambda: 0)
-    report = MacHardware(demo=False).capabilities()
-    assert report["platform"] == "macos"
-    assert report["can_test"] is True
-    assert report["can_verify"] is False

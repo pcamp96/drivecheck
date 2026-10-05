@@ -855,6 +855,7 @@ async def test_destructive_surface_uses_checksum_and_read_write(
     assert "--do_verify=1" in fio_call
     assert "--readonly" not in fio_call
     assert "--allow_file_create=0" in fio_call
+    assert "--direct=1" in fio_call
     assert "--verify_backlog=1024" in fio_call
 
 

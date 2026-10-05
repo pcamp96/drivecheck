@@ -122,7 +122,7 @@ def test_demo_full_run_report_and_history_survive_restart(tmp_path):
 
 
 def test_destructive_requires_station_arm_and_exact_serial(tmp_path):
-    with TestClient(app(tmp_path)) as client:
+    with TestClient(app(tmp_path, allow_destructive=False)) as client:
         drive = client.get("/api/state", headers=AUTH).json()["drives"][0]
         body = {
             "drive_id": drive["id"],

@@ -50,7 +50,10 @@ and adapter model. Exclude tokens, notification settings, and private account da
   drive identity, capacity and mounted state; missing tools/root must be explained.
   Relaunch as root with fio/smartctl installed. Use a spare drive, unmount normally,
   run Quick and then Extended, and verify original files after remounting.
-  Unsupported USB SMART must leave coverage incomplete. Writes must stay disabled.
+  Unsupported USB SMART must leave coverage incomplete. On disposable storage,
+  confirm Quick format preserves the partition layout, initialization creates one
+  exFAT volume, and Full erase writes and verifies the whole disk. Mounted/system
+  drives must remain blocked, and manual actions must require confirmation.
 - On the Pi, use a single-bay dock and configure an enabled provider, then enable
   headless mode. Close the dashboard. Dock an unmounted spare drive and confirm
   one read-only Quick test and a result message. For a passed/warning drive,

@@ -1,7 +1,8 @@
-"""Fail-closed macOS drive discovery and read-only testing."""
+"""Fail-closed macOS drive discovery, testing, and manual erasure."""
 
 from __future__ import annotations
 
+import hashlib
 import os
 import plistlib
 import re
@@ -36,7 +37,7 @@ def _children(value: Any):
 
 
 class MacHardware(Hardware):
-    """Darwin adapter; destructive verification is deliberately unavailable."""
+    """Darwin adapter using Disk Arbitration-aware system tools."""
 
     def capabilities(self) -> dict[str, Any]:
         tools = {
@@ -44,9 +45,10 @@ class MacHardware(Hardware):
         }
         root = hasattr(os, "geteuid") and os.geteuid() == 0
         can_test = root and all(tools[name] for name in ("diskutil", "ioreg", "fio"))
+        can_erase = root and tools["diskutil"] and tools["ioreg"]
         limitations = [
-            "Destructive verification is disabled on macOS.",
-            "Disk Arbitration can remount media; unmount immediately before a read scan.",
+            "Disk Arbitration can remount media; DriveCheck monitors mount state during raw I/O.",
+            "ATA firmware secure erase is unavailable through the supported macOS tools.",
         ]
         if not root:
             limitations.append("Raw drive tests require root privileges.")
@@ -57,20 +59,77 @@ class MacHardware(Hardware):
         return {
             "platform": "macos",
             "can_test": can_test,
-            "can_verify": False,
+            "can_verify": can_test,
             "can_unmount": tools["diskutil"] and tools["ioreg"],
             "can_eject": tools["diskutil"] and tools["ioreg"],
-            "can_erase": False,
+            "can_erase": can_erase,
             "can_take_control": False,
             "tools": tools,
             "limitations": limitations,
         }
 
     async def erase_plan(self, drive: Drive) -> dict[str, Any]:
-        detail = "Drive erasure is disabled on macOS because exclusive destructive access cannot be proved."
+        if self.demo:
+            return await super().erase_plan(drive)
+        try:
+            current = await self.validate(drive, destructive=True)
+        except (SafetyError, CommandError) as exc:
+            detail = f"Drive is not safely erasable: {exc}"
+            return self._unavailable_erase_plan(detail)
+        if not hasattr(os, "geteuid") or os.geteuid() != 0:
+            return self._unavailable_erase_plan("Root privileges are required to erase a drive.")
+        if not shutil.which("diskutil"):
+            return self._unavailable_erase_plan("diskutil is required to erase a drive on macOS.")
+
+        try:
+            targets = await self._format_targets(current)
+        except (SafetyError, CommandError) as exc:
+            quick = self._unavailable_erase(
+                "quick_format_exfat", False, f"Quick-format targets are unavailable: {exc}"
+            )
+            quick["targets"] = []
+        else:
+            if targets:
+                quick = {
+                    "available": True,
+                    "method": "quick_format_exfat",
+                    "secure": False,
+                    "detail": "Quick-formats one selected existing partition as exFAT without replacing the partition map.",
+                    "estimated_minutes": 2,
+                    "targets": targets,
+                }
+            else:
+                quick = self._unavailable_erase(
+                    "quick_format_exfat",
+                    False,
+                    "Quick format requires an existing ordinary, non-APFS, non-RAID partition. Use Initialize/reset disk to create a new layout.",
+                )
+                quick["targets"] = []
+        full_available = bool(shutil.which("fio"))
         return {
-            "quick": self._unavailable_erase("quick_format_exfat", False, detail),
-            "full": self._unavailable_erase("full_overwrite", True, detail),
+            "quick": quick,
+            "initialize": {
+                "available": True,
+                "method": "initialize_exfat",
+                "secure": False,
+                "detail": "Replaces the partition map with a GUID layout and a new exFAT volume; old data is not securely overwritten.",
+                "estimated_minutes": 2,
+            },
+            "secure": self._unavailable_erase(
+                "ata_secure_erase",
+                True,
+                "ATA firmware secure erase is unavailable through the supported macOS tools.",
+            ),
+            "full": {
+                "available": full_available,
+                "method": "full_overwrite",
+                "secure": True,
+                "detail": (
+                    "Writes and reads back the entire drive with SHA-256 verification."
+                    if full_available
+                    else "fio is required for a full overwrite."
+                ),
+            },
         }
 
     async def erase(
@@ -81,11 +140,245 @@ class MacHardware(Hardware):
         *,
         recovery_dir: Path,
         expected_method: str | None = None,
+        target_id: str | None = None,
     ) -> dict[str, Any]:
-        del drive, profile, progress, recovery_dir, expected_method
-        raise SafetyError(
-            "Drive erasure is disabled on macOS because exclusive destructive access cannot be proved."
+        if self.demo:
+            return await super().erase(
+                drive,
+                profile,
+                progress,
+                recovery_dir=recovery_dir,
+                expected_method=expected_method,
+                target_id=target_id,
+            )
+        del recovery_dir
+        choices = {
+            "quick_erase": "quick",
+            "initialize_disk": "initialize",
+            "secure_erase": "secure",
+            "full_erase": "full",
+        }
+        if profile not in choices:
+            raise ValueError("unknown erase profile")
+        current = await self.validate(drive, destructive=True)
+        choice = (await self.erase_plan(current))[choices[profile]]
+        if not choice["available"]:
+            raise SafetyError(choice["detail"])
+        if expected_method is not None and expected_method != choice["method"]:
+            raise SafetyError("erase method changed; review and confirm the new plan")
+        if profile == "quick_erase":
+            return await self._quick_format_exfat(current, progress, target_id)
+        if profile == "initialize_disk":
+            return await self._initialize_exfat(current, progress)
+        result = await super().surface(current, progress, destructive=True)
+        return {**result, "method": "full_overwrite"}
+
+    @staticmethod
+    def _unavailable_erase_plan(detail: str) -> dict[str, Any]:
+        return {
+            "quick": Hardware._unavailable_erase("quick_format_exfat", False, detail),
+            "initialize": Hardware._unavailable_erase("initialize_exfat", False, detail),
+            "secure": Hardware._unavailable_erase("ata_secure_erase", True, detail),
+            "full": Hardware._unavailable_erase("full_overwrite", True, detail),
+        }
+
+    async def _format_targets(self, drive: Drive) -> list[dict[str, Any]]:
+        records = await self._partition_records(drive)
+        protected_content = {
+            "efi",
+            "apple_boot",
+            "apple_apfs",
+            "apple_apfs_isc",
+            "apple_apfs_recovery",
+            "apple_apfs_vm",
+            "apple_raid",
+            "apple_raid_offline",
+        }
+        return [
+            {
+                "id": record["id"],
+                "path": record["path"],
+                "size_bytes": record["size_bytes"],
+                "start_offset": record["start_offset"],
+                "partuuid": record["partuuid"],
+                "filesystem": record["content"] or None,
+                "label": record["label"] or None,
+            }
+            for record in records
+            if record["content"].lower() not in protected_content
+        ]
+
+    async def _partition_topology(self, drive: Drive) -> tuple[tuple[Any, ...], ...]:
+        records = await self._partition_records(drive)
+        return tuple(
+            (
+                record["path"],
+                record["size_bytes"],
+                record["start_offset"],
+                record["partuuid"],
+            )
+            for record in records
         )
+
+    async def _partition_records(self, drive: Drive) -> list[dict[str, Any]]:
+        payload = await self._plist_command(
+            "diskutil", "list", "-plist", self._block_path(drive), required=True
+        )
+        if not isinstance(payload, dict):
+            raise CommandError("diskutil returned an unexpected partition map")
+        entries = payload.get("AllDisksAndPartitions", [])
+        if not isinstance(entries, list) or len(entries) != 1:
+            raise SafetyError("partition map did not uniquely match the selected drive")
+        entry = entries[0]
+        if not isinstance(entry, dict) or _string(entry.get("DeviceIdentifier")) != _whole(
+            self._block_path(drive)
+        ):
+            raise SafetyError("partition map did not match the selected drive")
+        partitions = entry.get("Partitions", [])
+        if not isinstance(partitions, list):
+            raise CommandError("diskutil returned an invalid partition map")
+        records: list[dict[str, Any]] = []
+        whole = _whole(self._block_path(drive))
+        for partition in partitions:
+            if not isinstance(partition, dict):
+                raise CommandError("diskutil returned an invalid partition entry")
+            identifier = _string(partition.get("DeviceIdentifier"))
+            content = _string(partition.get("Content"))
+            if not re.fullmatch(rf"{re.escape(whole)}s\d+", identifier):
+                raise SafetyError("partition identifier did not belong to the selected drive")
+            path = f"/dev/{identifier}"
+            info = await self._plist_command("diskutil", "info", "-plist", path, required=True)
+            if not isinstance(info, dict) or _whole(
+                _string(info.get("ParentWholeDisk") or info.get("DeviceIdentifier"))
+            ) != whole:
+                raise SafetyError("partition information did not match the selected drive")
+            try:
+                size = int(partition.get("Size") or 0)
+                start_offset = int(
+                    info.get("PartitionMapPartitionOffset")
+                    or partition.get("PartitionMapPartitionOffset")
+                )
+            except (TypeError, ValueError) as exc:
+                raise SafetyError("partition boundaries were invalid") from exc
+            if size <= 0 or start_offset < 0:
+                raise SafetyError("partition boundaries were invalid")
+            partuuid = _string(info.get("DiskUUID") or info.get("PartitionUUID"))
+            target_id = hashlib.sha256(
+                f"{identifier}\0{size}\0{start_offset}\0{partuuid}".encode()
+            ).hexdigest()[:24]
+            records.append(
+                {
+                    "id": target_id,
+                    "path": path,
+                    "size_bytes": size,
+                    "start_offset": start_offset,
+                    "partuuid": partuuid or None,
+                    "content": content,
+                    "label": _string(partition.get("VolumeName")),
+                }
+            )
+        return sorted(records, key=lambda item: item["path"])
+
+    async def _quick_format_exfat(
+        self, drive: Drive, progress: Progress, target_id: str | None
+    ) -> dict[str, Any]:
+        current = await self.validate(drive, destructive=True)
+        device_number = self._pin_device(current.path)
+        targets = await self._format_targets(current)
+        target = next((item for item in targets if item["id"] == target_id), None)
+        if target is None:
+            raise SafetyError("the selected quick-format volume is missing or changed")
+        topology = await self._partition_topology(current)
+        target_device_number = self._pin_device(target["path"])
+        await self._mac_destructive_revalidate(current, device_number)
+        if self._pin_device(target["path"]) != target_device_number:
+            raise SafetyError("quick-format volume device changed")
+        await progress(5, f"Quick-formatting {target['path']} as exFAT")
+        refreshed_targets = await self._format_targets(current)
+        refreshed = next((item for item in refreshed_targets if item["id"] == target_id), None)
+        if refreshed != target or await self._partition_topology(current) != topology:
+            raise SafetyError("partition map changed before quick format")
+        await self._mac_destructive_revalidate(current, device_number)
+        result = await self._runner.run(
+            "diskutil", "eraseVolume", "ExFAT", "DRIVECHECK", target["path"], timeout=60 * 60
+        )
+        if result.returncode:
+            raise CommandError(
+                result.stderr.strip() or "diskutil could not quick-format the selected volume"
+            )
+        info = await self._plist_command("diskutil", "info", "-plist", target["path"], required=True)
+        if not isinstance(info, dict) or _whole(
+            _string(info.get("ParentWholeDisk") or info.get("DeviceIdentifier"))
+        ) != _whole(self._block_path(current)):
+            raise SafetyError("formatted volume no longer belongs to the selected drive")
+        filesystem = _string(
+            info.get("FilesystemType") or info.get("FileSystemPersonality")
+        ).lower()
+        if "exfat" not in filesystem:
+            raise CommandError("the selected exFAT volume could not be verified")
+        if await self._partition_topology(current) != topology:
+            raise SafetyError("partition map changed during quick format")
+        await self._unmount_after_format(current)
+        await self._mac_destructive_revalidate(current, device_number)
+        await progress(100, f"Quick exFAT format completed on {target['path']}")
+        return {
+            "status": "passed",
+            "method": "quick_format_exfat",
+            "target": target,
+            "detail": f"{target['path']} was quick-formatted as exFAT; the partition map and other volumes were preserved. Old file contents may remain recoverable.",
+        }
+
+    async def _initialize_exfat(self, drive: Drive, progress: Progress) -> dict[str, Any]:
+        current = await self.validate(drive, destructive=True)
+        device_number = self._pin_device(current.path)
+        await self._mac_destructive_revalidate(current, device_number)
+        await progress(5, "Creating a new GUID partition map and exFAT volume")
+        await self._mac_destructive_revalidate(current, device_number)
+        result = await self._runner.run(
+            "diskutil",
+            "eraseDisk",
+            "ExFAT",
+            "DRIVECHECK",
+            "GPT",
+            self._block_path(current),
+            timeout=60 * 60,
+        )
+        if result.returncode:
+            raise CommandError(result.stderr.strip() or "diskutil could not initialize the drive")
+        await self._unmount_after_format(current)
+        await self._mac_destructive_revalidate(current, device_number)
+        targets = await self._format_targets(current)
+        if len(targets) != 1:
+            raise SafetyError("the new exFAT volume could not be identified uniquely")
+        info = await self._plist_command(
+            "diskutil", "info", "-plist", targets[0]["path"], required=True
+        )
+        filesystem = _string(
+            info.get("FilesystemType") or info.get("FileSystemPersonality")
+        ).lower() if isinstance(info, dict) else ""
+        if "exfat" not in filesystem:
+            raise CommandError("the new exFAT filesystem could not be verified")
+        await progress(100, "Disk initialization completed")
+        return {
+            "status": "passed",
+            "method": "initialize_exfat",
+            "detail": "The partition map was replaced with a GUID layout and one quick-formatted exFAT data volume; old data was not securely overwritten.",
+        }
+
+    async def _unmount_after_format(self, drive: Drive) -> None:
+        result = await self._runner.run(
+            "diskutil", "unmountDisk", self._block_path(drive), timeout=90
+        )
+        if result.returncode:
+            raise SafetyError(
+                result.stderr.strip() or "the newly formatted drive could not be unmounted"
+            )
+
+    async def _mac_destructive_revalidate(self, drive: Drive, device_number: int) -> Drive:
+        current = await self.validate(drive, destructive=True)
+        if self._pin_device(current.path) != device_number:
+            raise SafetyError("raw drive device number changed")
+        return current
 
     async def discover(self) -> list[Drive]:
         if self.demo:
@@ -217,20 +510,12 @@ class MacHardware(Hardware):
         return records
 
     async def validate(self, drive: Drive, destructive: bool = False) -> Drive:
-        if destructive:
-            raise SafetyError("destructive verification is disabled on macOS")
-        return await super().validate(drive, destructive=False)
+        return await super().validate(drive, destructive=destructive)
 
     async def surface(
         self, drive: Drive, progress: Progress, destructive: bool = False
     ) -> dict[str, Any]:
-        if destructive:
-            return {
-                "status": "unsupported",
-                "detail": "Destructive verification is disabled on macOS",
-                "raw": {},
-            }
-        return await super().surface(drive, progress, destructive=False)
+        return await super().surface(drive, progress, destructive=destructive)
 
     async def unmount(self, drive: Drive) -> dict[str, str]:
         if self.demo:
@@ -428,6 +713,13 @@ class MacHardware(Hardware):
     @staticmethod
     def _fio_engine() -> str:
         return "posixaio"
+
+    @staticmethod
+    def _fio_direct_args() -> tuple[str, ...]:
+        # Darwin raw character devices are already unbuffered. fio's direct
+        # option maps to Linux-style direct-I/O behavior that is not portable
+        # across the macOS engines supported by DriveCheck.
+        return ()
 
     @staticmethod
     def _pin_device(path: str) -> int:

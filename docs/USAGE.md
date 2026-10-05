@@ -106,8 +106,8 @@ with its estimated duration shown before confirmation. Frozen,
 locked, already security-enabled drives, ambiguous probes, unsupported adapters,
 and failed firmware commands block that action without changing Quick erase. The
 installer includes `hdparm`, `gdisk`, `exfatprogs`, `parted`, and `mdadm` along with
-the testing tools. macOS remains read-only; erase and RAID takeover are currently
-Linux-only.
+the testing tools. macOS supports manual Quick format, disk initialization, and
+full overwrite. ATA firmware Secure Erase and RAID takeover require Linux.
 
 Firmware erase uses a temporary password with a protected recovery record under
 `<data directory>/erase-recovery/<drive identity>.json` (directory 0700, file 0600).
@@ -123,9 +123,9 @@ inspect the recovery record and drive security state before deliberate recovery.
 DriveCheck does not automatically unlock, retry, or downgrade an uncertain erase.
 Do not delete that record merely to bypass the guard.
 
-To deliberately enable manual erase and full-drive write verification, change
-`DRIVECHECK_ALLOW_DESTRUCTIVE=true` in the station environment and restart the
-service. The dashboard shows the detected erase method before requiring
+Manual erase and full-drive write verification are enabled by default. To hide
+these controls, set `DRIVECHECK_ALLOW_DESTRUCTIVE=false` in the station environment
+and restart the service. Existing explicit settings are preserved on updates. The dashboard shows the detected erase method before requiring
 `QUICK FORMAT <exact serial> <volume path>` or `FULL ERASE <exact serial>`; legacy write verification
 still uses `ERASE <exact serial>`. A changed method requires a fresh confirmation.
 Automatic intake always remains Quick and read-only, even with manual erase enabled.

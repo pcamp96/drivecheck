@@ -38,7 +38,8 @@ Run checks appropriate to your change. Keep device tests separate and follow the
 
 - `drivecheck/`: API, scheduler, hardware adapters, notifications, and report storage.
 - `drivecheck/static/`: dashboard HTML, CSS, and JavaScript.
-- `scripts/` and `deploy/`: native Linux installation, removal, and service definition.
+- `install.sh`: standalone download-and-install entry point.
+- `scripts/` and `deploy/`: native Linux/macOS installation, removal, and services.
 - `tests/`: isolated unit and integration tests.
 - `docs/`: installation, configuration, usage, and [architecture](docs/ARCHITECTURE.md).
 

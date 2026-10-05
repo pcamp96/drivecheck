@@ -1844,7 +1844,7 @@ class Hardware:
             "--name=drivecheck",
             f"--filename={current.path}",
             "--allow_file_create=0",
-            "--direct=1",
+            *self._fio_direct_args(),
             f"--ioengine={self._fio_engine()}",
             "--iodepth=16",
             f"--bs={block_size}",
@@ -1945,6 +1945,10 @@ class Hardware:
     @staticmethod
     def _fio_engine() -> str:
         return "libaio"
+
+    @staticmethod
+    def _fio_direct_args() -> tuple[str, ...]:
+        return ("--direct=1",)
 
     @staticmethod
     def _smart_path(drive: Drive) -> str:

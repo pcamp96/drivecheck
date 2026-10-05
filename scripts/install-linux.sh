@@ -103,6 +103,13 @@ fi
 
 python3 -c 'import sys; assert sys.version_info >= (3, 11), "Python 3.11 or newer is required"'
 
+# An update must not interrupt testing, a firmware erase, or post-test release.
+# Check before package installation and again immediately before service stop.
+check_idle() {
+  python3 "$source_dir/scripts/check-idle.py" "$data_dir/drivecheck.sqlite3"
+}
+check_idle
+
 packages=(python3-venv python3-pip smartmontools fio util-linux udisks2 mdadm hdparm gdisk exfatprogs parted)
 missing=()
 for package in "${packages[@]}"; do
@@ -144,6 +151,7 @@ if [[ "$smart_package_new" == true && "$smart_units_preexisting" == false ]]; th
 fi
 
 if systemctl is-active --quiet drivecheck.service; then
+  check_idle
   systemctl stop drivecheck.service
 fi
 
@@ -162,6 +170,9 @@ find "$app_dir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 cp -R "$source_dir/drivecheck" "$app_dir/drivecheck"
 install -m 644 "$source_dir/pyproject.toml" "$source_dir/requirements.lock" \
   "$source_dir/LICENSE" "$source_dir/README.md" "$app_dir/"
+if [[ -f "$source_dir/DEPLOYED_REVISION" ]]; then
+  install -m 644 "$source_dir/DEPLOYED_REVISION" "$app_dir/"
+fi
 if [[ -z "$install_root" ]]; then
   chown -R root:root "$app_dir" "$config_dir" "$data_dir"
 fi

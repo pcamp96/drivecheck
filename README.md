@@ -17,7 +17,7 @@ cloud service, or frontend build is required.
   window to choose another test.
 - **Telegram controls:** results, test buttons, and dashboard links. Discord supports notifications.
 - **Readable reports:** clear failure explanations, downloadable reports, and test history.
-- **Optional formatting and erase:** manual Linux-only actions, disabled by default.
+- **Formatting and erase:** manual Quick format, disk initialization, and full overwrite, with confirmation.
 
 ## Supported platforms
 
@@ -25,7 +25,7 @@ cloud service, or frontend build is required.
 | --- | --- |
 | Raspberry Pi OS, 64-bit, Bookworm or newer | Full native station; Pi 4/5 recommended |
 | Debian / Ubuntu, Python 3.11+ | Full native station |
-| macOS, Python 3.11+ | Read-only testing and normal unmount/eject |
+| macOS with Homebrew | Native station; formatting, overwrite, and unmount/eject |
 | Windows | Simulation only |
 
 For a dedicated station, use separate boot storage and a powered single-drive USB
@@ -33,17 +33,30 @@ dock with SMART passthrough. Adapter compatibility varies.
 
 ## Getting started
 
-On a supported Pi or Linux host with Python 3.11+, Git, and `sudo`:
+Download one installer on your station. No Git checkout is needed:
 
 ```sh
-git clone https://github.com/pcamp96/drivecheck.git
-cd drivecheck
-sudo bash scripts/install-linux.sh
+curl -fsSL https://raw.githubusercontent.com/pcamp96/drivecheck/main/install.sh -o install-drivecheck.sh
+```
+
+On a supported Pi or Linux host with Python 3.11+, run:
+
+```sh
+sudo bash install-drivecheck.sh
 sudo cat /var/lib/drivecheck/access-token
 ```
 
-The installer adds the required tools and enables DriveCheck at boot. From your
-computer, open an SSH tunnel using the station's username and hostname or IP:
+On macOS with [Homebrew](https://brew.sh) installed, run **without sudo**; the
+installer requests it when needed:
+
+```sh
+bash install-drivecheck.sh
+sudo cat /var/db/drivecheck/access-token
+```
+
+The installer adds the tools and a background service that starts at boot.
+On the Mac, open <http://127.0.0.1:8765>. To access a Pi/Linux station from your
+computer, open an SSH tunnel using its username and hostname or IP:
 
 ```sh
 ssh -L 8765:127.0.0.1:8765 YOUR_USER@YOUR_PI

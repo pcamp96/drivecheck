@@ -86,8 +86,10 @@ requires eligibility and observed detach before repeat work.
 
 macOS inventory uses diskutil plists and IORegistry identity. Read tests use the
 raw character device and a portable fio engine. It continuously checks identity
-and mount state, without Linux's O_EXCL mount exclusion; destructive verification
-is disabled. Normal diskutil unmount/eject is allowed only on fresh matching
+and mount state, without Linux's O_EXCL mount exclusion. Manual formatting uses
+diskutil; full overwrite and verification use fio with fresh identity/mount checks.
+Firmware Secure Erase and RAID takeover remain Linux-only. Normal diskutil
+unmount/eject is allowed only on fresh matching
 external devices. Linux release refuses a shared/unknown USB power-off scope.
 
 ## Station readiness notices
