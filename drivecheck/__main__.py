@@ -19,7 +19,7 @@ def main():
     mode.add_argument(
         "--hardware", action="store_true", help="Discover real external drives on Linux or macOS"
     )
-    parser.add_argument("--host", default=os.getenv("DRIVECHECK_HOST", "127.0.0.1"))
+    parser.add_argument("--host", default=os.getenv("DRIVECHECK_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("DRIVECHECK_PORT", "8765")))
     parser.add_argument("--data-dir", type=Path)
     parser.add_argument(
@@ -55,7 +55,10 @@ def main():
     # Reserve the endpoint before lifespan can announce readiness or queue work.
     listener = server_config.bind_socket()
     print(f"DriveCheck {'simulation' if config.demo else 'hardware'} station")
-    print(f"Dashboard: http://{args.host}:{listener.getsockname()[1]}")
+    display_host = "127.0.0.1" if args.host == "0.0.0.0" else args.host
+    print(f"Dashboard: http://{display_host}:{listener.getsockname()[1]}")
+    if args.host == "0.0.0.0":
+        print(f"LAN dashboard: http://YOUR_STATION_IP:{listener.getsockname()[1]}")
     print(
         f"Read your sign-in token from {config.data_dir / 'access-token'} (or use DRIVECHECK_API_KEY)"
     )

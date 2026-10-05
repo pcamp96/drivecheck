@@ -37,35 +37,36 @@ Installer options:
 - `--no-start`: install the boot-time service, leaving it stopped for configuration.
 - `--ref TAG_OR_COMMIT`: install a specific branch, tag, or full commit SHA.
 - `--dry-run`: resolve the revision and show the plan without installing.
+- `--lan`: switch an existing local-only installation to LAN access without editing its environment file; other settings are preserved.
 
 A source checkout still supports `sudo bash scripts/install-linux.sh`;
 `scripts/install-pi.sh` is an alias for that native installer.
 
 The service runs as root because raw block I/O and SMART ioctls require device
-permissions. Its dashboard listens on loopback by default. From a **separate
-computer**, open an SSH tunnel; replace `YOUR_USER` and `YOUR_PI` with the station's
-SSH username and hostname or IP address:
+permissions. Fresh installations listen on `0.0.0.0`, so the dashboard is
+available directly across the LAN. Open `http://YOUR_STATION_IP:8765` from your
+computer using the station's IP address; the installer prints detected network
+addresses. On the station itself, <http://127.0.0.1:8765> also works.
+
+To switch an older local-only installation, download the current bootstrap
+script and run `sudo bash install-drivecheck.sh --lan`. On macOS, run
+`bash install-drivecheck.sh --lan` without sudo. This preserves other settings,
+reports, and credentials, and refuses to interrupt unfinished jobs.
+Ordinary updates retain an explicitly configured bind address.
+
+Local-only listening is optional: set `DRIVECHECK_HOST=127.0.0.1` in
+`/etc/drivecheck/drivecheck.env` and restart. You can then access it remotely
+using an SSH tunnel from the computer with the browser:
 
 ```sh
-ssh -L 8765:127.0.0.1:8765 YOUR_USER@YOUR_PI
+ssh -N -L 8765:127.0.0.1:8765 YOUR_USER@YOUR_STATION
 ```
 
-Then browse <http://127.0.0.1:8765>. To use a trusted LAN directly, set
-`DRIVECHECK_HOST=0.0.0.0` in `/etc/drivecheck/drivecheck.env` and restart the
-service, then open `http://YOUR_PI:8765` using the station's hostname or IP address.
-Plain HTTP exposes the sign-in token/session to anyone able to observe
-that connection; use SSH forwarding or HTTPS on shared/untrusted networks. Do
-not forward the service port to the internet. For a TLS reverse proxy set
-`DRIVECHECK_PUBLIC_ORIGIN` to its exact HTTPS origin and
-`DRIVECHECK_SECURE_COOKIE=true`; the app does not trust forwarded headers.
-
-If the browser is on the station itself, open the loopback URL directly; no SSH
-tunnel is needed. Otherwise run the tunnel on the computer with the browser.
-An SSH host-key mismatch is separate from DriveCheck. Check the station's key
-fingerprint at its trusted console with
-`sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`. Once verified, remove the
-old entry on the client with `ssh-keygen -R YOUR_PI` and reconnect.
-See the [OpenSSH key-management manual](https://man.openbsd.net/ssh-keygen.1).
+For a TLS reverse proxy set `DRIVECHECK_PUBLIC_ORIGIN` to its exact HTTPS origin
+and `DRIVECHECK_SECURE_COOKIE=true`; the app does not trust forwarded headers.
+Authentication is required for drive controls and reports. Keep the dashboard
+on your trusted network; HTTP is unencrypted and the port should not be forwarded
+to the internet. SSH forwarding or HTTPS remains available on shared networks.
 
 ## Install on macOS
 
@@ -81,7 +82,8 @@ bash install-drivecheck.sh
 sudo cat /var/db/drivecheck/access-token
 ```
 
-Open <http://127.0.0.1:8765> and sign in with that token. The native launchd
+Open `http://YOUR_MAC_IP:8765` from another computer on the LAN, or
+<http://127.0.0.1:8765> on the Mac itself, and sign in with that token. The native launchd
 service starts at boot, with no terminal left open. The app lives in
 `/opt/drivecheck`, configuration in `/etc/drivecheck/drivecheck.env`, and private
 settings/reports in `/var/db/drivecheck`. It supports the same installer options

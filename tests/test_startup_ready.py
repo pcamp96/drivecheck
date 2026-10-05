@@ -136,3 +136,28 @@ def test_health_reports_serving_process_pid(tmp_path):
         health = client.get("/api/health").json()
         assert health["pid"] == os.getpid()
         assert health["mode"] == "demo"
+
+
+@pytest.mark.parametrize("platform,output", [
+    ("linux", json.dumps([{"addr_info": [
+        {"family": "inet", "local": "192.168.1.112"},
+        {"family": "inet", "local": "127.0.0.1"},
+        {"family": "inet", "local": "169.254.1.2"},
+    ]}])),
+    ("macos", "en0: flags=UP\n\tinet 192.168.1.112 netmask 0xffffff00\nlo0: flags=UP\n\tinet 127.0.0.1 netmask 0xff000000\n"),
+])
+def test_ready_output_discovers_network_urls_without_external_connection(monkeypatch, platform, output):
+    monkeypatch.setattr(ready.subprocess, "run", lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, output, ""))
+    assert ready.lan_urls(platform, 9123) == ["http://192.168.1.112:9123"]
+
+
+def test_ready_message_offers_lan_url_and_keeps_token_private(station, monkeypatch, capsys):
+    config, token, options = station
+    token.write_text(options["key"])
+    monkeypatch.setattr(ready, "lan_urls", lambda _platform, port: [f"http://192.168.1.112:{port}"])
+    monkeypatch.setattr(sys, "argv", ["wait-ready.py", str(config), "--platform", "linux"])
+    ready.main()
+    output = capsys.readouterr().out
+    assert "Network dashboard: http://192.168.1.112:" in output
+    assert options["key"] not in output
+    assert "sudo cat" in output

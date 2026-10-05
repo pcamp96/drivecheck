@@ -53,6 +53,7 @@ exit 0''')
         files = [ROOT / name for name in (
             "scripts/install-linux.sh", "scripts/uninstall-linux.sh", "scripts/install-macos.sh",
             "scripts/uninstall-macos.sh", "scripts/check-idle.py", "scripts/wait-ready.py", "deploy/drivecheck.service",
+            "scripts/configure-lan.py",
             "deploy/run-macos.sh", "pyproject.toml", "requirements.lock", ".env.example",
             "LICENSE", "README.md", "drivecheck/__init__.py",
         )]
@@ -91,6 +92,7 @@ def test_standalone_install_update_uninstall_preserves_private_state(tmp_path, p
     data = root / ("var/db/drivecheck" if platform == "Darwin" else "var/lib/drivecheck")
     assert (root / "opt/drivecheck/DEPLOYED_REVISION").read_text().strip() == REVISION
     assert "DRIVECHECK_ALLOW_DESTRUCTIVE=true" in config.read_text()
+    assert "DRIVECHECK_HOST=0.0.0.0" in config.read_text()
     assert stat.S_IMODE(data.stat().st_mode) == 0o700
     assert stat.S_IMODE(config.stat().st_mode) == 0o600
     calls = (tmp_path / "commands.log").read_text()
@@ -255,3 +257,34 @@ def test_no_start_does_not_offer_a_token_before_startup(tmp_path, platform):
     assert "generated on first startup" in result.stdout
     assert "Sign-in token: sudo cat" not in result.stdout
     assert "startup probe" not in (tmp_path / "commands.log").read_text()
+
+
+@pytest.mark.parametrize("platform", ["Linux", "Darwin"])
+def test_lan_switch_updates_only_bind_address_and_preserves_explicit_default(tmp_path, platform):
+    env = environment(tmp_path, platform)
+    assert bootstrap(env, "--no-start").returncode == 0
+    root = Path(env["DRIVECHECK_TEST_ROOT"])
+    config = root / "etc/drivecheck/drivecheck.env"
+    content = 'DRIVECHECK_HOST=127.0.0.1\nDRIVECHECK_PORT=9123\nDRIVECHECK_API_KEY="synthetic-private-key"\nDRIVECHECK_HEADLESS=false\n'
+    config.write_text(content)
+    assert bootstrap(env, "--no-start").returncode == 0
+    assert config.read_text() == content
+    result = bootstrap(env, "--lan", "--no-start")
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == content.replace("DRIVECHECK_HOST=127.0.0.1", "DRIVECHECK_HOST=0.0.0.0")
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+
+
+def test_lan_switch_refuses_busy_station_without_changing_config(tmp_path):
+    env = environment(tmp_path)
+    assert bootstrap(env, "--no-start").returncode == 0
+    root = Path(env["DRIVECHECK_TEST_ROOT"])
+    config = root / "etc/drivecheck/drivecheck.env"
+    config.write_text("DRIVECHECK_HOST=127.0.0.1\n")
+    with sqlite3.connect(root / "var/lib/drivecheck/drivecheck.sqlite3") as database:
+        database.execute("CREATE TABLE runs (data TEXT)")
+        database.execute("INSERT INTO runs VALUES (?)", (json.dumps({"status": "running"}),))
+    result = bootstrap(env, "--lan")
+    assert result.returncode != 0
+    assert "unfinished work" in result.stderr
+    assert config.read_text() == "DRIVECHECK_HOST=127.0.0.1\n"

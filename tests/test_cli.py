@@ -107,3 +107,19 @@ def test_shutdown_with_live_dashboard_stream_completes_cleanup(tmp_path):
             if process.poll() is None:
                 process.kill()
                 process.wait()
+
+
+@pytest.mark.parametrize("configured,expected", [(None, "0.0.0.0"), ("127.0.0.1", "127.0.0.1")])
+def test_default_listens_on_lan_with_explicit_address_override(tmp_path, monkeypatch, configured, expected):
+    monkeypatch.delenv("DRIVECHECK_HOST", raising=False)
+    if configured:
+        monkeypatch.setenv("DRIVECHECK_HOST", configured)
+    observed = []
+
+    def run(server, sockets):
+        observed.append((server.config.host, sockets[0].getsockname()[0]))
+
+    monkeypatch.setattr("drivecheck.__main__.uvicorn.Server.run", run)
+    monkeypatch.setattr(sys, "argv", ["drivecheck", "--demo", "--port", "0", "--data-dir", str(tmp_path)])
+    main()
+    assert observed == [(expected, expected)]

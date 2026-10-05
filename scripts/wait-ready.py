@@ -1,6 +1,7 @@
 """Verify the started native station before an installer reports success."""
 
 import argparse
+import ipaddress
 import json
 import re
 import shlex
@@ -50,7 +51,7 @@ def service_pid(platform):
 
 def wait_ready(path, platform, timeout=60):
     values = configuration(path, platform)
-    host = values.get("DRIVECHECK_HOST", "127.0.0.1")
+    host = values.get("DRIVECHECK_HOST", "0.0.0.0")
     host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
     port = int(values.get("DRIVECHECK_PORT", "8765"))
     if not 0 < port < 65536:
@@ -101,6 +102,33 @@ def wait_ready(path, platform, timeout=60):
     raise RuntimeError(f"DriveCheck did not become ready within {timeout:g} seconds ({reason})")
 
 
+def lan_urls(platform, port):
+    """Read local interface addresses without connecting to an external host."""
+    try:
+        if platform == "linux":
+            result = subprocess.run(
+                ["ip", "-j", "-4", "address", "show", "up", "scope", "global"],
+                capture_output=True, text=True, timeout=2, check=True,
+            )
+            addresses = [
+                item["local"] for interface in json.loads(result.stdout)
+                for item in interface.get("addr_info", []) if item.get("family") == "inet"
+            ]
+        else:
+            result = subprocess.run(
+                ["/sbin/ifconfig"], capture_output=True, text=True, timeout=2, check=True,
+            )
+            addresses = re.findall(r"^\s*inet (\d+\.\d+\.\d+\.\d+)\b", result.stdout, re.MULTILINE)
+        valid = {
+            str(address) for raw in addresses
+            if not (address := ipaddress.ip_address(raw)).is_loopback
+            and not address.is_link_local and not address.is_unspecified and not address.is_multicast
+        }
+        return [f"http://{address}:{port}" for address in sorted(valid)]
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        return []
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
@@ -120,6 +148,13 @@ def main():
         diagnostics(args.platform)
         raise SystemExit(1) from None
     print(f"Dashboard ready: {base}")
+    values = configuration(args.config, args.platform)
+    if values.get("DRIVECHECK_HOST", "0.0.0.0") == "0.0.0.0":
+        urls = lan_urls(args.platform, int(values.get("DRIVECHECK_PORT", "8765")))
+        for url in urls:
+            print(f"Network dashboard: {url}")
+        if not urls:
+            print(f"LAN dashboard: http://YOUR_STATION_IP:{values.get('DRIVECHECK_PORT', '8765')}")
     if fixed_key:
         print("Sign in with the configured DRIVECHECK_API_KEY; no access-token file is generated.")
     else:

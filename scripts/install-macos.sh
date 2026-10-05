@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo 'Usage: bash scripts/install-macos.sh [--no-start]'
+  echo 'Usage: bash scripts/install-macos.sh [--no-start] [--lan]'
   echo 'Requires Homebrew. Installs a root launchd drive testing and formatting service.'
 }
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -15,11 +15,17 @@ fi
 
 # Homebrew must run as the login user. Elevate only the native application install.
 if [[ ${1:-} != --system ]]; then
-  case "${1:-}" in
-    ''|--no-start) ;;
-    -h|--help) usage; exit 0 ;;
-    *) usage >&2; exit 2 ;;
-  esac
+  start_service=true
+  lan=false
+  while (($#)); do
+    case "$1" in
+      --no-start) start_service=false ;;
+      --lan) lan=true ;;
+      -h|--help) usage; exit 0 ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
   if [[ -z "$install_root" && ( $(uname -s) != Darwin || $EUID -eq 0 ) ]]; then
     echo 'Run this installer on macOS as your normal user, without sudo.' >&2
     exit 1
@@ -33,23 +39,27 @@ if [[ ${1:-} != --system ]]; then
   brew install python@3.13 fio smartmontools
   python_path="$(brew --prefix python@3.13)/bin/python3.13"
   tool_prefix=$(brew --prefix)
-  if [[ ${1:-} == --no-start ]]; then
-    sudo bash "$0" --system "$python_path" "$tool_prefix" --no-start
-  else
-    sudo bash "$0" --system "$python_path" "$tool_prefix"
-  fi
+  set -- "$0" --system "$python_path" "$tool_prefix"
+  if [[ "$start_service" == false ]]; then set -- "$@" --no-start; fi
+  if [[ "$lan" == true ]]; then set -- "$@" --lan; fi
+  sudo bash "$@"
   exit 0
 fi
 shift
-if (($# < 2 || $# > 3)); then usage >&2; exit 2; fi
+if (($# < 2)); then usage >&2; exit 2; fi
 python_path=$1
 tool_prefix=$2
 start_service=true
-if [[ ${3:-} == --no-start ]]; then
-  start_service=false
-elif [[ -n ${3:-} ]]; then
-  usage >&2; exit 2
-fi
+lan=false
+shift 2
+while (($#)); do
+  case "$1" in
+    --no-start) start_service=false ;;
+    --lan) lan=true ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  shift
+done
 if [[ -z "$install_root" && ( $(uname -s) != Darwin || $EUID -ne 0 ) ]]; then
   echo 'The system install stage requires root on macOS.' >&2
   exit 1
@@ -116,6 +126,9 @@ if [[ ! -e "$config_dir/drivecheck.env" ]]; then
   sed 's|DRIVECHECK_DATA_DIR=/var/lib/drivecheck|DRIVECHECK_DATA_DIR=/var/db/drivecheck|' \
     "$source_dir/.env.example" >"$config_dir/drivecheck.env"
   chmod 600 "$config_dir/drivecheck.env"
+fi
+if [[ "$lan" == true ]]; then
+  "$python_path" "$source_dir/scripts/configure-lan.py" "$config_dir/drivecheck.env"
 fi
 "$python_path" - "$unit_path" "$app_dir" "$data_dir" "$tool_prefix" <<'PY'
 import plistlib

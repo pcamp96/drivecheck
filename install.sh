@@ -4,13 +4,14 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: bash install.sh [--ref BRANCH_TAG_OR_COMMIT] [--no-start] [--dry-run]
+Usage: bash install.sh [--ref BRANCH_TAG_OR_COMMIT] [--no-start] [--lan] [--dry-run]
 
 Downloads and installs DriveCheck on Debian-based Linux or macOS. Defaults to main.
 Linux: run with sudo. macOS: run as your normal user with Homebrew installed;
 the native installer requests sudo when needed.
 --ref       Install a specific GitHub branch, tag, or full commit SHA.
 --no-start  Install and enable the service without starting it.
+--lan       Enable LAN access on an existing installation (fresh installs default to LAN).
 --dry-run   Resolve the revision and print the plan without installing.
 EOF
 }
@@ -18,6 +19,7 @@ EOF
 ref=main
 no_start=false
 dry_run=false
+lan=false
 while (($#)); do
   case "$1" in
     --ref)
@@ -29,6 +31,7 @@ while (($#)); do
       shift 2
       ;;
     --no-start) no_start=true; shift ;;
+    --lan) lan=true; shift ;;
     --dry-run) dry_run=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
@@ -94,6 +97,7 @@ if [[ "$dry_run" == true ]]; then
   printf 'Would download: %s\n' "$archive_url"
   printf 'Would install the native app, required packages, and %s service.\n' "$([[ "$platform" == Darwin ]] && echo launchd || echo systemd)"
   printf 'Existing station configuration and reports would be preserved.\n'
+  if [[ "$lan" == true ]]; then printf 'Would enable LAN access (DRIVECHECK_HOST=0.0.0.0).\n'; fi
   printf 'Service start: %s\n' "$([[ "$no_start" == true ]] && echo disabled || echo enabled)"
   exit 0
 fi
@@ -139,6 +143,7 @@ for required in (
     "scripts/install-linux.sh", "scripts/uninstall-linux.sh", "deploy/drivecheck.service",
     "scripts/install-macos.sh", "scripts/uninstall-macos.sh", "scripts/check-idle.py",
     "scripts/wait-ready.py",
+    "scripts/configure-lan.py",
     "deploy/run-macos.sh",
     "drivecheck/__init__.py", "pyproject.toml", "requirements.lock", ".env.example",
     "LICENSE", "README.md",
@@ -151,9 +156,8 @@ if [[ "$platform" == Darwin ]]; then
   native_installer=install-macos.sh
 fi
 printf '%s\n' "$revision" >"$work_dir/source/drivecheck-$revision/DEPLOYED_REVISION"
-if [[ "$no_start" == true ]]; then
-  bash "$work_dir/source/drivecheck-$revision/scripts/$native_installer" --no-start
-else
-  bash "$work_dir/source/drivecheck-$revision/scripts/$native_installer"
-fi
+set -- "$work_dir/source/drivecheck-$revision/scripts/$native_installer"
+if [[ "$no_start" == true ]]; then set -- "$@" --no-start; fi
+if [[ "$lan" == true ]]; then set -- "$@" --lan; fi
+bash "$@"
 printf 'Installed revision: %s\n' "$revision"

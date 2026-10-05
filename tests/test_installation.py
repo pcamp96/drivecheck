@@ -73,6 +73,7 @@ def test_reinstall_and_default_uninstall_preserve_config_and_data(tmp_path):
     initial = config.read_text()
     assert "DRIVECHECK_HEADLESS=false" in initial
     assert "DRIVECHECK_ALLOW_DESTRUCTIVE=true" in initial
+    assert "DRIVECHECK_HOST=0.0.0.0" in initial
     assert (root / "opt/drivecheck/LICENSE").is_file()
     assert (root / "opt/drivecheck/README.md").is_file()
     manifest = root / "etc/drivecheck/install-manifest"

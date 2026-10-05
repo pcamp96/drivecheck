@@ -55,16 +55,13 @@ sudo cat /var/db/drivecheck/access-token
 ```
 
 The installer adds the tools and a background service that starts at boot.
-On the Mac, open <http://127.0.0.1:8765>. To access a Pi/Linux station from your
-computer, open an SSH tunnel using its username and hostname or IP:
+The dashboard is available across your LAN by default. Open
+`http://YOUR_STATION_IP:8765` from another computer, or <http://127.0.0.1:8765>
+on the station itself, and sign in with the token. No SSH tunnel is needed.
 
-```sh
-ssh -L 8765:127.0.0.1:8765 YOUR_USER@YOUR_PI
-```
-
-Open <http://127.0.0.1:8765> and sign in with the token. In **Settings**, configure
-Telegram or Discord, then enable automatic testing and eject. For unattended
-startup notifications and operation, follow the [headless setup guide](docs/CONFIGURATION.md).
+In **Settings**, configure Telegram or Discord, then enable automatic testing
+and eject. For unattended startup notifications and operation, follow the
+[headless setup guide](docs/CONFIGURATION.md).
 
 See [installation instructions](docs/INSTALLATION.md) for prerequisites, LAN
 access, macOS, simulation, updates, and uninstalling.

@@ -3,20 +3,25 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: sudo bash scripts/install-linux.sh [--no-start]
+Usage: sudo bash scripts/install-linux.sh [--no-start] [--lan]
 
 Installs or updates DriveCheck on Debian/Ubuntu Linux. --no-start installs and
 enables the service but leaves it stopped so its environment can be edited.
+--lan switches an existing station to LAN access, preserving other settings.
 EOF
 }
 
 start_service=true
-case "${1:-}" in
-  "") ;;
-  --no-start) start_service=false ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
-esac
+lan=false
+while (($#)); do
+  case "$1" in
+    --no-start) start_service=false ;;
+    --lan) lan=true ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  shift
+done
 
 # Used only by fixture tests; production installations always have no prefix.
 install_root=${DRIVECHECK_TEST_ROOT:-}
@@ -184,6 +189,9 @@ python3 -m venv "$app_dir/.venv"
 if [[ ! -e "$config_dir/drivecheck.env" ]]; then
   install -m 600 "$source_dir/.env.example" "$config_dir/drivecheck.env"
 fi
+if [[ "$lan" == true ]]; then
+  python3 "$source_dir/scripts/configure-lan.py" "$config_dir/drivecheck.env"
+fi
 initially_missing=${missing[*]-}
 if [[ -f "$manifest" ]] && grep -q '^apt_packages_initially_missing=' "$manifest"; then
   previous_missing=$(sed -n 's/^apt_packages_initially_missing=//p' "$manifest" | head -n 1)
@@ -219,6 +227,4 @@ else
   printf '  sudo systemctl start drivecheck\n'
   printf 'The sign-in token is generated on first startup, unless DRIVECHECK_API_KEY is configured.\n'
 fi
-printf 'From a separate computer, open an SSH tunnel to the station (default port):\n'
-printf '  ssh -N -L 8765:127.0.0.1:8765 USER@HOST\n'
 printf 'Uninstall later: sudo drivecheck-uninstall [--purge-data]\n'
