@@ -37,6 +37,7 @@ const elements = {
   takeControlSubmit: $("#take-control-submit"),
   eraseDialog: $("#erase-dialog"), eraseForm: $("#erase-form"), eraseTitle: $("#erase-title"),
   eraseDrive: $("#erase-drive"), eraseMethod: $("#erase-method"), eraseDeadline: $("#erase-deadline"),
+  eraseTargetWrap: $("#erase-target-wrap"), eraseTarget: $("#erase-target"),
   erasePhrase: $("#erase-phrase"), eraseConfirmation: $("#erase-confirmation"),
   eraseError: $("#erase-error"), eraseSubmit: $("#erase-submit"),
   estimateDialog: $("#estimate-dialog"), estimateForm: $("#estimate-form"),
@@ -276,7 +277,7 @@ function renderActive() {
   elements.activeEmpty.hidden = Boolean(run);
   elements.activeContent.hidden = !run;
   const firmwareCancelBlocked = firmwareErase && run?.status === "running";
-  const destructive = ["quick_erase", "secure_erase", "full_erase", "verify"].includes(run?.profile);
+  const destructive = ["quick_erase", "initialize_disk", "secure_erase", "full_erase", "verify"].includes(run?.profile);
   elements.cancelButton.hidden = !run || awaiting;
   elements.cancelButton.disabled = firmwareCancelBlocked;
   elements.cancelButton.textContent = destructive ? "Cancel erase" : "Cancel test";
@@ -327,7 +328,7 @@ function renderActive() {
     : ["smart_before", "benchmark", "smart_after"];
   const runPhases = Array.isArray(run.steps) && run.steps.length
     ? run.steps
-    : ["quick_erase", "secure_erase", "full_erase"].includes(run.profile)
+    : ["quick_erase", "initialize_disk", "secure_erase", "full_erase"].includes(run.profile)
     ? ["erase"]
     : run.profile === "quick"
       ? fallbackQuickPhases
@@ -503,6 +504,7 @@ function renderDrives() {
     if (drive.eligible && capabilities.can_erase !== false) {
       actions.append(
         eraseButton("Quick erase", drive, "quick_erase", busy && !awaitingThisDrive),
+        eraseButton("Initialize/reset disk", drive, "initialize_disk", busy && !awaitingThisDrive),
         eraseButton("Firmware secure erase", drive, "secure_erase", busy && !awaitingThisDrive),
         eraseButton("Full erase", drive, "full_erase", busy && !awaitingThisDrive)
       );
@@ -607,7 +609,7 @@ function releaseButton(label, drive, action, busy) {
 }
 
 function profileLabel(profile) {
-  return ({ quick: "Quick", extended: "Extended", verify: "Erase + verify", quick_erase: "Quick erase", secure_erase: "Firmware secure erase", full_erase: "Full erase" })[profile] || profile || "Unknown";
+  return ({ quick: "Quick", extended: "Extended", verify: "Erase + verify", quick_erase: "Quick erase", initialize_disk: "Initialize/reset disk", secure_erase: "Firmware secure erase", full_erase: "Full erase" })[profile] || profile || "Unknown";
 }
 
 function statusLabel(status) {
@@ -635,6 +637,7 @@ function eraseMethodLabel(method) {
   return ({
     ata_secure_erase: "ATA firmware Secure Erase",
     quick_format_exfat: "Quick Format (exFAT)",
+    initialize_exfat: "Initialize disk with one exFAT volume",
     full_overwrite: "Complete overwrite"
   })[method] || method || "Method not reported";
 }
@@ -642,7 +645,7 @@ function eraseMethodLabel(method) {
 function appendEraseEvidence(body, value) {
   const method = value.method || value.actual_method;
   const recoveryState = value.recovery_state || value.recovery || "Not reported";
-  const warning = value.recovery_required || method === "quick_format_exfat";
+  const warning = value.recovery_required || ["quick_format_exfat", "initialize_exfat"].includes(method);
   const overview = document.createElement("div");
   overview.className = `diagnostic-summary ${warning ? "warning" : (value.status || "passed")}`;
   overview.append(
@@ -1243,7 +1246,8 @@ async function openErase(drive, profile) {
   });
   eraseRequest = request;
   const choices = {
-    quick_erase: { key: "quick", phrase: "QUICK ERASE", title: "Quick erase this drive?", button: "Quick erase" },
+    quick_erase: { key: "quick", phrase: "QUICK FORMAT", title: "Quick-format a volume?", button: "Quick-format volume" },
+    initialize_disk: { key: "initialize", phrase: "INITIALIZE DISK", title: "Initialize and reset this entire disk?", button: "Initialize/reset disk" },
     secure_erase: { key: "secure", phrase: "SECURE ERASE", title: "Securely erase this drive using its firmware?", button: "Firmware secure erase" },
     full_erase: { key: "full", phrase: "FULL ERASE", title: "Fully erase this drive?", button: "Full erase" }
   };
@@ -1256,6 +1260,8 @@ async function openErase(drive, profile) {
   elements.eraseError.textContent = "";
   elements.eraseMethod.className = "erase-method";
   elements.eraseMethod.textContent = "Checking the available erase method…";
+  elements.eraseTargetWrap.hidden = true;
+  elements.eraseTarget.replaceChildren();
   elements.eraseSubmit.disabled = true;
   elements.eraseSubmit.textContent = choice.button;
   elements.eraseDialog.showModal();
@@ -1271,7 +1277,31 @@ async function openErase(drive, profile) {
       elements.eraseError.textContent = "Erase is unavailable.";
       return;
     }
-    eraseRequest = Object.freeze({ ...request, method: option.method });
+    let target = null;
+    if (profile === "quick_erase") {
+      const targets = option.targets || [];
+      if (!targets.length) {
+        elements.eraseMethod.textContent = option.detail || "No existing volume is available to quick-format.";
+        elements.eraseError.textContent = "Quick format is unavailable. Use Initialize/reset disk to create a new volume.";
+        return;
+      }
+      for (const item of targets) {
+        const targetOption = document.createElement("option");
+        targetOption.value = item.id;
+        targetOption.textContent = `${item.path} · ${formatBytes(item.size_bytes)} · ${item.filesystem || "unformatted"}${item.label ? ` · ${item.label}` : ""}`;
+        elements.eraseTarget.append(targetOption);
+      }
+      elements.eraseTargetWrap.hidden = false;
+      target = targets[0];
+    }
+    eraseRequest = Object.freeze({
+      ...request,
+      method: option.method,
+      targets: option.targets || [],
+      target_id: target?.id || null,
+      target_path: target?.path || null
+    });
+    elements.erasePhrase.textContent = `${choice.phrase} ${request.serial}${target ? ` ${target.path}` : ""}`;
     const estimate = option.estimated_minutes != null ? ` Estimated time: about ${option.estimated_minutes} minutes.` : "";
     if (option.method === "quick_format_exfat" || option.secure === false) {
       elements.eraseMethod.className = "erase-method warning";
@@ -1297,6 +1327,16 @@ function closeErase() {
   elements.eraseError.textContent = "";
   elements.eraseConfirmation.value = "";
 }
+
+elements.eraseTarget.addEventListener("change", () => {
+  if (!eraseRequest || eraseRequest.profile !== "quick_erase") return;
+  const target = eraseRequest.targets.find((item) => item.id === elements.eraseTarget.value);
+  if (!target) return;
+  eraseRequest = Object.freeze({ ...eraseRequest, target_id: target.id, target_path: target.path });
+  elements.erasePhrase.textContent = `QUICK FORMAT ${eraseRequest.serial} ${target.path}`;
+  elements.eraseConfirmation.value = "";
+  elements.eraseError.textContent = "";
+});
 
 elements.loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1465,7 +1505,7 @@ elements.eraseForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!eraseRequest?.method) return;
   const request = eraseRequest;
-  const phrase = `${({ quick_erase: "QUICK ERASE", secure_erase: "SECURE ERASE", full_erase: "FULL ERASE" })[request.profile]} ${request.serial}`;
+  const phrase = `${({ quick_erase: "QUICK FORMAT", initialize_disk: "INITIALIZE DISK", secure_erase: "SECURE ERASE", full_erase: "FULL ERASE" })[request.profile]} ${request.serial}${request.target_path ? ` ${request.target_path}` : ""}`;
   if (elements.eraseConfirmation.value !== phrase) {
     elements.eraseError.textContent = `Enter “${phrase}” exactly.`;
     elements.eraseConfirmation.focus();
@@ -1476,7 +1516,7 @@ elements.eraseForm.addEventListener("submit", async (event) => {
   try {
     const result = await api(`/api/drives/${encodeURIComponent(request.id)}/erase`, {
       method: "POST",
-      body: { profile: request.profile, confirmation: phrase, expected_method: request.method }
+      body: { profile: request.profile, confirmation: phrase, expected_method: request.method, target_id: request.target_id }
     });
     selectedRunId = result.run?.id || selectedRunId;
     closeErase();

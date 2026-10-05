@@ -160,9 +160,11 @@ If automatic intake already started, rescan reports that job rather than queuing
 
 Buttons only apply to the original, safely identified drive; expired,
 replayed, missing, mounted, or replaced drive actions are rejected. When manual
-erase is enabled, **Quick erase**, **Firmware secure erase**, and **Full erase** buttons open a confirmation
+erase is enabled, **Quick erase**, **Initialize/reset disk**, **Firmware secure erase**,
+and **Full erase** buttons open a confirmation
 prompt; pressing the button does not write to the drive. Reply to that exact
-prompt with `QUICK ERASE <exact serial>`, `SECURE ERASE <exact serial>`, or
+prompt with `QUICK FORMAT <exact serial> <volume path>`,
+`INITIALIZE DISK <exact serial>`, `SECURE ERASE <exact serial>`, or
 `FULL ERASE <exact serial>` within
 120 seconds (or the remaining action window, whichever is shorter). Only the
 configured chat and authorized sender can confirm. The original eject countdown
@@ -193,7 +195,8 @@ Filesystem mounting cannot bring an ejected USB device back online. Quick runs t
 | Quick | SMART before/after, firmware short SMART self-test, and a 30-second sequential read sample | None |
 | Extended | SMART, extended drive self-test, read benchmark, full read scan, final SMART | None |
 | Write verification | Extended self-test, read benchmark, full-drive write and checksum readback, SMART before/after | **Entire selected drive overwritten** |
-| Quick erase (manual) | Removes signatures and creates one empty exFAT volume; usually completes in minutes, but old contents may remain recoverable | **Filesystem and partition data lost** |
+| Quick erase (manual) | Recreates the selected existing volume as exFAT without scanning every sector; preserves the partition table and other volumes | **Selected volume's filesystem and files lost; old contents may remain recoverable** |
+| Initialize/reset disk (manual) | Replaces the entire partition layout with one empty exFAT volume | **All partitions and files lost; old contents may remain recoverable** |
 | Firmware secure erase (manual) | Explicit ATA firmware Secure Erase when the drive and adapter support it; may take many hours and cannot safely be cancelled after it starts | **Entire selected drive erased** |
 | Full erase (manual) | Full accessible drive overwrite and SHA-256 checksum readback | **Entire selected drive overwritten** |
 
@@ -276,10 +279,16 @@ and queue read-only Quick intake. It preserves RAID metadata and existing file
 contents. Active/shared arrays and other holders remain blocked; DriveCheck
 never automatically takes control or removes RAID metadata.
 
-Quick erase always removes old signatures and creates a GPT disk with one empty
-exFAT partition. It is designed to finish in minutes and is **not secure erasure**:
-old file contents can remain recoverable. ATA firmware Secure Erase is a separate,
-explicit action with its estimated duration shown before confirmation. Frozen,
+Quick erase follows Windows Quick Format semantics for a selected existing volume:
+it recreates the filesystem metadata as exFAT without scanning every sector. The
+partition table and other partitions are preserved. The dashboard requires a
+specific volume choice when a disk has more than one; Telegram offers Quick erase
+only when exactly one eligible volume exists and otherwise directs you to the
+dashboard. A disk with no existing volume cannot be quick-formatted. Use the
+separate **Initialize/reset disk** action to replace its entire partition layout
+with one exFAT volume. Both operations are **not secure erasure**: old file contents
+can remain recoverable. ATA firmware Secure Erase is a separate, explicit action
+with its estimated duration shown before confirmation. Frozen,
 locked, already security-enabled drives, ambiguous probes, unsupported adapters,
 and failed firmware commands block that action without changing Quick erase. The
 installer includes `hdparm`, `gdisk`, `exfatprogs`, `parted`, and `mdadm` along with
@@ -303,7 +312,7 @@ Do not delete that record merely to bypass the guard.
 To deliberately enable manual erase and full-drive write verification, change
 `DRIVECHECK_ALLOW_DESTRUCTIVE=true` in the station environment and restart the
 service. The dashboard shows the detected erase method before requiring
-`QUICK ERASE <exact serial>` or `FULL ERASE <exact serial>`; legacy write verification
+`QUICK FORMAT <exact serial> <volume path>` or `FULL ERASE <exact serial>`; legacy write verification
 still uses `ERASE <exact serial>`. A changed method requires a fresh confirmation.
 Automatic intake always remains Quick and read-only, even with manual erase enabled.
 Queued/running jobs are recorded as incomplete on restart, and erase jobs never

@@ -300,7 +300,12 @@ def main():
                 erase_state["system"]["active_run_id"] = None
                 erase_plan_calls = []
                 erase_posts = []
-                erase_attempts = {"quick_erase": 0, "secure_erase": 0, "full_erase": 0}
+                erase_attempts = {
+                    "quick_erase": 0,
+                    "initialize_disk": 0,
+                    "secure_erase": 0,
+                    "full_erase": 0,
+                }
 
                 erase_context = browser.new_context(viewport={"width": 1200, "height": 900})
                 erase_page = erase_context.new_page()
@@ -323,6 +328,31 @@ def main():
                                 "method": "quick_format_exfat",
                                 "secure": False,
                                 "detail": "Creates a new empty exFAT volume.",
+                                "estimated_minutes": 2,
+                                "targets": [
+                                    {
+                                        "id": "fixture-volume-1",
+                                        "path": "/dev/sdz1",
+                                        "size_bytes": 3_900_000_000_000,
+                                        "partuuid": "fixture-part-1",
+                                        "filesystem": "ntfs",
+                                        "label": "ARTICLE",
+                                    },
+                                    {
+                                        "id": "fixture-volume-2",
+                                        "path": "/dev/sdz2",
+                                        "size_bytes": 100_000_000_000,
+                                        "partuuid": "fixture-part-2",
+                                        "filesystem": "ext4",
+                                        "label": "KEEP",
+                                    },
+                                ],
+                            },
+                            "initialize": {
+                                "available": True,
+                                "method": "initialize_exfat",
+                                "secure": False,
+                                "detail": "Replace the partition table with one exFAT volume.",
                                 "estimated_minutes": 2,
                             },
                             "secure": {
@@ -380,35 +410,51 @@ def main():
                 expect(erase_page.locator("#erase-method")).to_contain_text(
                     "old files may be recoverable"
                 )
-                erase_page.locator("#erase-confirmation").fill("QUICK ERASE wrong")
+                expect(erase_page.locator("#erase-target")).to_be_visible()
+                expect(erase_page.locator("#erase-target option")).to_have_count(2)
+                expect(erase_page.locator("#erase-phrase")).to_contain_text("/dev/sdz1")
+                erase_page.locator("#erase-target").select_option("fixture-volume-2")
+                expect(erase_page.locator("#erase-phrase")).to_contain_text("/dev/sdz2")
+                erase_page.locator("#erase-confirmation").fill("QUICK FORMAT wrong")
                 erase_page.locator("#erase-submit").click()
                 expect(erase_page.locator("#erase-error")).to_contain_text("exactly")
                 assert erase_posts == []
-                erase_page.locator("#erase-confirmation").fill("QUICK ERASE FIXTURE-ERASE-1")
+                erase_page.locator("#erase-confirmation").fill(
+                    "QUICK FORMAT FIXTURE-ERASE-1 /dev/sdz2"
+                )
                 erase_page.locator("#erase-submit").click()
                 expect(erase_page.locator("#erase-error")).to_contain_text("method changed")
-                erase_page.locator("#erase-confirmation").fill("QUICK ERASE FIXTURE-ERASE-1")
+                erase_page.locator("#erase-confirmation").fill(
+                    "QUICK FORMAT FIXTURE-ERASE-1 /dev/sdz2"
+                )
                 erase_page.locator("#erase-submit").click()
                 expect(erase_page.locator("#erase-dialog")).to_be_hidden()
                 assert erase_posts[-1]["expected_method"] == "quick_format_exfat"
+                assert erase_posts[-1]["target_id"] == "fixture-volume-2"
 
-                erase_page.get_by_role(
-                    "button", name="Firmware secure erase", exact=True
-                ).click()
+                erase_page.get_by_role("button", name="Initialize/reset disk", exact=True).click()
+                expect(erase_page.locator("#erase-method")).to_contain_text(
+                    "Initialize disk with one exFAT volume"
+                )
+                expect(erase_page.locator("#erase-target-wrap")).to_be_hidden()
+                erase_page.locator("#erase-confirmation").fill("INITIALIZE DISK FIXTURE-ERASE-1")
+                erase_page.locator("#erase-submit").click()
+                expect(erase_page.locator("#erase-error")).to_contain_text("method changed")
+                erase_page.locator("#erase-confirmation").fill("INITIALIZE DISK FIXTURE-ERASE-1")
+                erase_page.locator("#erase-submit").click()
+                expect(erase_page.locator("#erase-dialog")).to_be_hidden()
+                assert erase_posts[-1]["expected_method"] == "initialize_exfat"
+                assert erase_posts[-1]["target_id"] is None
+
+                erase_page.get_by_role("button", name="Firmware secure erase", exact=True).click()
                 expect(erase_page.locator("#erase-method")).to_contain_text(
                     "ATA firmware Secure Erase"
                 )
-                expect(erase_page.locator("#erase-method")).to_contain_text(
-                    "Cannot safely cancel"
-                )
-                erase_page.locator("#erase-confirmation").fill(
-                    "SECURE ERASE FIXTURE-ERASE-1"
-                )
+                expect(erase_page.locator("#erase-method")).to_contain_text("Cannot safely cancel")
+                erase_page.locator("#erase-confirmation").fill("SECURE ERASE FIXTURE-ERASE-1")
                 erase_page.locator("#erase-submit").click()
                 expect(erase_page.locator("#erase-error")).to_contain_text("method changed")
-                erase_page.locator("#erase-confirmation").fill(
-                    "SECURE ERASE FIXTURE-ERASE-1"
-                )
+                erase_page.locator("#erase-confirmation").fill("SECURE ERASE FIXTURE-ERASE-1")
                 erase_page.locator("#erase-submit").click()
                 expect(erase_page.locator("#erase-dialog")).to_be_hidden()
                 assert erase_posts[-1]["expected_method"] == "ata_secure_erase"

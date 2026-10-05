@@ -386,9 +386,10 @@ def test_erase_routes_require_authentication_and_method_bound_serial_confirmatio
             "profile": "quick_erase",
             "confirmation": "WRONG",
             "expected_method": plan["quick"]["method"],
+            "target_id": plan["quick"]["targets"][0]["id"],
         }
         assert client.post(path + "/erase", headers=AUTH, json=body).status_code == 409
-        body["confirmation"] = f"QUICK ERASE {drive['serial']}"
+        body["confirmation"] = f"QUICK FORMAT {drive['serial']} /dev/demo1"
         body["expected_method"] = "ata_secure_erase"
         assert client.post(path + "/erase", headers=AUTH, json=body).status_code == 409
         body["expected_method"] = plan["quick"]["method"]

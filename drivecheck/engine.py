@@ -18,9 +18,10 @@ from drivecheck.storage import Store
 from drivecheck.telegram import TelegramInterface
 
 TERMINAL = {"passed", "warning", "failed", "incomplete", "cancelled"}
-ERASE_PROFILES = {"quick_erase", "secure_erase", "full_erase"}
+ERASE_PROFILES = {"quick_erase", "initialize_disk", "secure_erase", "full_erase"}
 ERASE_PLAN_KEYS = {
     "quick_erase": "quick",
+    "initialize_disk": "initialize",
     "secure_erase": "secure",
     "full_erase": "full",
 }
@@ -368,13 +369,27 @@ class Engine:
             raise ValueError("Erase is unavailable on this station")
         return await self.hardware.erase_plan(drive)
 
-    def _erase_phrase(self, profile: str, serial: str) -> str:
+    def _erase_phrase(self, profile: str, serial: str, target: dict | None = None) -> str:
         prefix = {
-            "quick_erase": "QUICK ERASE ",
+            "quick_erase": "QUICK FORMAT ",
+            "initialize_disk": "INITIALIZE DISK ",
             "secure_erase": "SECURE ERASE ",
             "full_erase": "FULL ERASE ",
         }[profile]
-        return prefix + serial
+        suffix = f" {target['path']}" if profile == "quick_erase" and target else ""
+        return prefix + serial + suffix
+
+    @staticmethod
+    def _erase_target(profile: str, plan: dict, target_id: str | None) -> dict | None:
+        if profile != "quick_erase":
+            if target_id:
+                raise ValueError("This erase action does not accept a volume target")
+            return None
+        targets = plan.get("targets") or []
+        target = next((item for item in targets if item.get("id") == target_id), None)
+        if target is None:
+            raise ValueError("Choose a current quick-format volume and review the confirmation")
+        return target
 
     def _telegram_authority(self, chat_id: int, user_id: int) -> str:
         notice = self.settings.value["notifications"]
@@ -407,6 +422,13 @@ class Engine:
         plan = (await self.erase_plan(drive.id))[ERASE_PLAN_KEYS[profile]]
         if not plan.get("available"):
             raise ValueError(plan.get("detail", "This erase method is unavailable"))
+        target_id = None
+        if profile == "quick_erase":
+            targets = plan.get("targets") or []
+            if len(targets) != 1:
+                raise ValueError("Open the dashboard to choose the volume to quick-format")
+            target_id = targets[0]["id"]
+        target = self._erase_target(profile, plan, target_id)
         if authority != self._telegram_authority(chat_id, user_id):
             raise ValueError("Telegram erase authorization changed")
         if context:
@@ -432,25 +454,34 @@ class Engine:
             "drive": drive.to_dict(),
             "profile": profile,
             "method": plan["method"],
+            "target_id": target_id,
+            "target": target,
             "principal": (chat_id, user_id),
             "authority": authority,
             "deadline": deadline,
             "waiting_run": run_id if wait else None,
             "reconnect_context": run_id if context else None,
         }
-        phrase = self._erase_phrase(profile, drive.serial)
+        phrase = self._erase_phrase(profile, drive.serial, target)
         seconds = max(0, int(deadline - time.monotonic()))
         message = (
             f"⚠️ Confirm {profile.replace('_', ' ')}\n\n"
             f"{drive.model}\nSerial: {drive.serial}\nCapacity: {drive.size_bytes / 1e12:.2f} TB\n\n"
-            f"Method: {plan['detail']}\nAll data on this drive will be lost."
+            f"Method: {plan['detail']}"
         )
+        if target:
+            message += (
+                f"\nVolume: {target['path']} · {target['size_bytes'] / 1e9:.2f} GB"
+                f"\nOnly this volume will be formatted. Other partitions are preserved."
+            )
+        else:
+            message += "\nAll data in the selected erase scope will be lost."
         minutes = timing.positive(plan.get("estimated_minutes"))
         if minutes is not None:
             message += f"\nEstimated duration: about {timing.duration(minutes * 60)}."
         if plan["method"] == "ata_secure_erase":
             message += "\nCannot safely cancel once firmware erase starts."
-        if plan["method"] == "quick_format_exfat":
+        if plan["method"] in {"quick_format_exfat", "initialize_exfat"}:
             message += (
                 "\nQuick format is NOT secure erasure; old file contents may remain recoverable."
             )
@@ -470,10 +501,17 @@ class Engine:
             "authority"
         ] != self._telegram_authority(chat_id, user_id):
             raise ValueError("Erase confirmation is not authorized")
-        if confirmation != self._erase_phrase(intent["profile"], intent["drive"]["serial"]):
+        if confirmation != self._erase_phrase(
+            intent["profile"], intent["drive"]["serial"], intent.get("target")
+        ):
             raise ValueError("The erase phrase must match exactly")
         response = await self.request_erase(
-            intent["drive"]["id"], intent["profile"], confirmation, intent["method"], intent=intent
+            intent["drive"]["id"],
+            intent["profile"],
+            confirmation,
+            intent["method"],
+            target_id=intent.get("target_id"),
+            intent=intent,
         )
         self.erase_intents.pop(intent_id, None)
         return response
@@ -485,6 +523,7 @@ class Engine:
         confirmation: str,
         expected_method: str,
         *,
+        target_id: str | None = None,
         intent: dict | None = None,
     ) -> dict:
         if profile not in ERASE_PROFILES or not self.config.allow_destructive:
@@ -495,10 +534,13 @@ class Engine:
             drive = next((item for item in self.drives if item.id == drive_id), None)
             if not drive or self._recovery_pending(drive):
                 raise ValueError("Drive is missing or needs firmware recovery")
-            if not drive.serial or confirmation != self._erase_phrase(profile, drive.serial):
-                raise ValueError("The erase phrase must match the exact drive serial")
             await self.hardware.validate(drive, destructive=True)
             plan = (await self.hardware.erase_plan(drive))[ERASE_PLAN_KEYS[profile]]
+            target = self._erase_target(profile, plan, target_id)
+            if not drive.serial or confirmation != self._erase_phrase(
+                profile, drive.serial, target
+            ):
+                raise ValueError("The erase phrase must match the exact drive serial and volume")
             if not plan.get("available") or plan.get("method") != expected_method:
                 raise ValueError(
                     "The erase method changed or is unavailable. Review a fresh confirmation."
@@ -511,6 +553,8 @@ class Engine:
                     intent["deadline"] <= time.monotonic()
                     or original["identity"] != drive.identity
                     or original["path"] != drive.path
+                    or intent.get("target_id") != target_id
+                    or intent.get("target") != target
                     or intent["authority"] != self._telegram_authority(*intent["principal"])
                 ):
                     raise ValueError("Erase confirmation expired or the drive changed")
@@ -538,6 +582,7 @@ class Engine:
                     choice=profile,
                     confirmation=confirmation,
                     expected_method=expected_method,
+                    target_id=target_id,
                     erase_intent=intent,
                 )
                 wait["event"].set()
@@ -549,6 +594,7 @@ class Engine:
                 profile,
                 confirmation,
                 expected_method=expected_method,
+                target_id=target_id,
                 erase_intent=intent,
             )
             return {"status": "queued", "detail": "Confirmed erase queued.", "run": run}
@@ -582,6 +628,7 @@ class Engine:
         automatic: bool = False,
         replacing_run_id: str | None = None,
         expected_method: str | None = None,
+        target_id: str | None = None,
         erase_intent: dict | None = None,
         reconnect_context: str | None = None,
     ) -> dict:
@@ -607,13 +654,13 @@ class Engine:
         if profile in ERASE_PROFILES:
             allowed = {
                 "quick_erase": {"quick_format_exfat"},
+                "initialize_disk": {"initialize_exfat"},
                 "secure_erase": {"ata_secure_erase"},
                 "full_erase": {"full_overwrite"},
             }[profile]
             if (
                 not self.config.allow_destructive
                 or expected_method not in allowed
-                or confirmation != self._erase_phrase(profile, drive.serial)
                 or not drive.serial
             ):
                 raise ValueError(
@@ -631,8 +678,11 @@ class Engine:
         )
         if profile in ERASE_PROFILES:
             plan = (await self.hardware.erase_plan(drive))[ERASE_PLAN_KEYS[profile]]
+            target = self._erase_target(profile, plan, target_id)
             if not plan.get("available") or plan.get("method") != expected_method:
                 raise ValueError("The erase method changed; review a fresh confirmation")
+            if confirmation != self._erase_phrase(profile, drive.serial, target):
+                raise ValueError("The erase phrase or selected volume changed")
             estimate = timing.build_erase_estimate(drive, profile, plan)
         else:
             estimate = await self.test_estimate(drive.id, profile)
@@ -676,6 +726,9 @@ class Engine:
             run["estimate"] = estimate
         if profile in ERASE_PROFILES:
             run["erase_method"] = expected_method
+            if target_id:
+                run["erase_target_id"] = target_id
+                run["erase_target"] = target
         self.store.save(run)
         # Any new job supersedes previously offered Telegram controls, including
         # jobs queued from the dashboard or automatic discovery.
@@ -1133,11 +1186,14 @@ class Engine:
                 if phase == "erase":
                     if not self.config.allow_destructive or self._recovery_pending(drive):
                         raise SafetyError("Erase is disabled or firmware recovery is required")
-                    plan = (await self.hardware.erase_plan(drive))[
-                        ERASE_PLAN_KEYS[run["profile"]]
-                    ]
+                    plan = (await self.hardware.erase_plan(drive))[ERASE_PLAN_KEYS[run["profile"]]]
+                    target = self._erase_target(run["profile"], plan, run.get("erase_target_id"))
                     if not plan.get("available") or plan.get("method") != run["erase_method"]:
                         raise SafetyError("Erase method changed; review a fresh confirmation")
+                    if target != run.get("erase_target"):
+                        raise SafetyError(
+                            "Quick-format volume changed; review a fresh confirmation"
+                        )
                     run["estimate"] = timing.build_erase_estimate(drive, run["profile"], plan)
                     self.record(run)
                     result = await self.hardware.erase(
@@ -1146,6 +1202,7 @@ class Engine:
                         progress,
                         recovery_dir=self.config.data_dir / "erase-recovery",
                         expected_method=run["erase_method"],
+                        target_id=run.get("erase_target_id"),
                     )
                 elif phase.startswith("smart"):
                     result = await self.hardware.smart(drive)
@@ -1366,6 +1423,10 @@ class Engine:
                 [
                     {"text": "Quick erase", "callback_data": f"dc:{run_id}:quick_erase"},
                     {
+                        "text": "Initialize/reset disk",
+                        "callback_data": f"dc:{run_id}:initialize_disk",
+                    },
+                    {
                         "text": "Firmware secure erase",
                         "callback_data": f"dc:{run_id}:secure_erase",
                     },
@@ -1520,6 +1581,7 @@ class Engine:
                                 wait.get("confirmation", ""),
                                 replacing_run_id=run["id"],
                                 expected_method=wait.get("expected_method"),
+                                target_id=wait.get("target_id"),
                                 erase_intent=wait.get("erase_intent"),
                             )
                         except Exception:

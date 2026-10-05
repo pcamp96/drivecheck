@@ -252,13 +252,17 @@ def _phase_lines(phase: str, result: dict[str, Any]) -> list[str]:
         description = {
             "ata_secure_erase": "Drive firmware secure erase",
             "quick_format_exfat": "Quick exFAT format",
+            "initialize_exfat": "Disk reset with one exFAT volume",
             "full_overwrite": "Complete overwrite with checksum readback",
         }.get(method, method)
         lines.append(f"  Method: {description}.")
-        if method == "quick_format_exfat":
+        if method in {"quick_format_exfat", "initialize_exfat"}:
             lines.append(
                 "  Security: Quick format is not secure erasure; old file contents may remain recoverable."
             )
+        target = result.get("target")
+        if isinstance(target, dict) and target.get("path"):
+            lines.append(f"  Volume: {_text(target.get('path'))}.")
         if result.get("recovery_required"):
             lines.append(
                 "  Recovery required: Do not power off this drive. Inspect the protected erase recovery record on the station."
@@ -284,7 +288,12 @@ def human_report(run: dict[str, Any], demo: bool = False) -> str:
 
     if run.get("steps"):
         expected = run["steps"]
-    if run.get("profile") in {"quick_erase", "secure_erase", "full_erase"}:
+    if run.get("profile") in {
+        "quick_erase",
+        "initialize_disk",
+        "secure_erase",
+        "full_erase",
+    }:
         expected = ["erase"]
     lines = ["DriveCheck Report", "=" * 17, f"VERDICT: {status}"]
     if demo:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import stat
 import sys
@@ -139,6 +140,11 @@ async def test_plan_keeps_quick_format_separate_from_optional_firmware_erase(
 ) -> None:
     hardware = safe_hardware(monkeypatch)
     monkeypatch.setattr("drivecheck.hardware.shutil.which", lambda name: f"/usr/bin/{name}")
+
+    async def targets(_path):
+        return [{"id": "volume-1", "path": "/dev/sda1", "size_bytes": 900_000_000}]
+
+    monkeypatch.setattr(hardware, "_format_targets", targets)
     hardware._runner = Runner([response(READY)])
     hardware._probe_runner = hardware._runner
     plan = await hardware.erase_plan(drive())
@@ -165,6 +171,17 @@ async def test_plan_keeps_quick_format_separate_from_optional_firmware_erase(
     assert blocked["available"] is False
     assert blocked["method"] == "ata_secure_erase"
 
+    async def no_targets(_path):
+        return []
+
+    monkeypatch.setattr(hardware, "_format_targets", no_targets)
+    hardware._runner = Runner([response(UNSUPPORTED)])
+    hardware._probe_runner = hardware._runner
+    empty = await hardware.erase_plan(drive())
+    assert empty["quick"]["available"] is False
+    assert "existing unmounted partition" in empty["quick"]["detail"]
+    assert empty["initialize"]["available"] is True
+
 
 @pytest.mark.asyncio
 async def test_expected_method_drift_stops_before_mutation(
@@ -174,6 +191,11 @@ async def test_expected_method_drift_stops_before_mutation(
     monkeypatch.setattr("drivecheck.hardware.shutil.which", lambda name: f"/usr/bin/{name}")
     hardware._runner = Runner([])
     hardware._probe_runner = Runner([response(READY)])
+
+    async def targets(_path):
+        return [{"id": "volume-1", "path": "/dev/sda1", "size_bytes": 900_000_000}]
+
+    monkeypatch.setattr(hardware, "_format_targets", targets)
 
     async def progress(_percent: int, _detail: str) -> None:
         return None
@@ -317,31 +339,47 @@ async def test_quick_format_command_contract_and_verification(
         "drivecheck.hardware.shutil.which",
         lambda name: None if name == "hdparm" else f"/usr/bin/{name}",
     )
-    operation = Runner(
-        [
-            response(),
-            response(),
-            response(),
-            response(),
-            response(),
-            response(),
-            response("TYPE=exfat\n"),
-        ]
-    )
+    operation = Runner([response(), response("TYPE=exfat\n")])
     hardware._runner = operation
-    old = json.dumps(
+    topology = json.dumps(
         {
             "blockdevices": [
                 {
                     "path": "/dev/sda",
                     "type": "disk",
-                    "children": [{"path": "/dev/sda1", "type": "part", "pkname": "/dev/sda"}],
+                    "children": [
+                        {
+                            "path": "/dev/sda1",
+                            "type": "part",
+                            "pkname": "/dev/sda",
+                            "size": 600_000_000,
+                            "start": 1_048_576,
+                            "partuuid": "uuid-1",
+                            "parttype": "basic-data",
+                            "maj:min": "8:1",
+                            "fstype": "ntfs",
+                            "label": "TARGET",
+                            "mountpoints": [None],
+                        },
+                        {
+                            "path": "/dev/sda2",
+                            "type": "part",
+                            "pkname": "/dev/sda",
+                            "size": 400_000_000,
+                            "start": 601_048_576,
+                            "partuuid": "uuid-2",
+                            "parttype": "linux-data",
+                            "maj:min": "8:2",
+                            "fstype": "ext4",
+                            "label": "KEEP",
+                            "mountpoints": [None],
+                        },
+                    ],
                 }
             ]
         }
     )
-    new = old.replace("/dev/sda1", "/dev/sda1")
-    hardware._discovery_runner = Runner([response(old), *(response(new) for _ in range(6))])
+    hardware._discovery_runner = Runner([response(topology) for _ in range(5)])
     claim_state = {"active": False}
 
     @contextmanager
@@ -372,16 +410,80 @@ async def test_quick_format_command_contract_and_verification(
         progress,
         recovery_dir=tmp_path,
         expected_method="quick_format_exfat",
+        target_id=hashlib.sha256(
+            "\0".join(["/dev/sda1", "600000000", "1048576", "uuid-1", "basic-data", "8:1"]).encode()
+        ).hexdigest()[:24],
     )
     assert result["status"] == "passed"
     calls = [args for args, _kwargs in hardware._runner.calls]
-    assert calls[:2] == [
-        ("wipefs", "--all", "--force", "/dev/sda1"),
-        ("wipefs", "--all", "--force", "/dev/sda"),
-    ]
-    mkfs = next(call for call in calls if call[0] == "mkfs.exfat")
+    assert [call[0] for call in calls] == ["mkfs.exfat", "blkid"]
+    assert not {"wipefs", "sgdisk", "partprobe"}.intersection(call[0] for call in calls)
+    mkfs = calls[0]
     assert "-K" in mkfs and "-L" in mkfs and "-f" not in mkfs
-    assert calls[-1] == ("blkid", "-o", "export", "/dev/sda1")
+    assert mkfs[-1] == "/dev/sda1"
+    assert all("/dev/sda2" not in call for call in calls)
+    assert calls[1] == ("blkid", "-o", "export", "/dev/sda1")
+    assert result["target"]["path"] == "/dev/sda1"
+
+
+@pytest.mark.asyncio
+async def test_quick_format_stops_if_selected_partition_boundaries_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    hardware = safe_hardware(monkeypatch)
+    monkeypatch.setattr("drivecheck.hardware.shutil.which", lambda name: f"/usr/bin/{name}")
+
+    def topology(start: int) -> str:
+        return json.dumps(
+            {
+                "blockdevices": [
+                    {
+                        "path": "/dev/sda",
+                        "type": "disk",
+                        "children": [
+                            {
+                                "path": "/dev/sda1",
+                                "type": "part",
+                                "pkname": "/dev/sda",
+                                "size": 1_000_000_000,
+                                "start": start,
+                                "partuuid": "same-uuid",
+                                "parttype": "basic-data",
+                                "maj:min": "8:1",
+                                "mountpoints": [None],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+    hardware._runner = Runner([])
+    hardware._discovery_runner = Runner(
+        [
+            response(topology(1_048_576)),
+            response(topology(1_048_576)),
+            response(topology(2_097_152)),
+        ]
+    )
+    target_id = hashlib.sha256(
+        "\0".join(["/dev/sda1", "1000000000", "1048576", "same-uuid", "basic-data", "8:1"]).encode()
+    ).hexdigest()[:24]
+
+    async def progress(_percent: int, _detail: str) -> None:
+        return None
+
+    result = await hardware.erase(
+        drive(),
+        "quick_erase",
+        progress,
+        recovery_dir=tmp_path,
+        expected_method="quick_format_exfat",
+        target_id=target_id,
+    )
+    assert result["status"] == "failed"
+    assert "topology changed" in result["detail"]
+    assert hardware._runner.calls == []
 
 
 @pytest.mark.asyncio

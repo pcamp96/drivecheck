@@ -171,6 +171,7 @@ def _profile_name(profile: object) -> str:
         "extended": "Extended test",
         "verify": "Full verification",
         "quick_erase": "Quick erase",
+        "initialize_disk": "Initialize/reset disk",
         "secure_erase": "Firmware secure erase",
         "full_erase": "Full erase",
     }.get(str(profile), "Drive test")
@@ -215,10 +216,14 @@ def _erase_lines(run: dict) -> list[str]:
     label = {
         "ata_secure_erase": "Drive firmware secure erase",
         "quick_format_exfat": "Quick exFAT format",
+        "initialize_exfat": "Disk reset with one exFAT volume",
         "full_overwrite": "Complete overwrite with read-back verification",
     }.get(method, _clean_line(method, fallback="Unknown method", limit=80))
     lines = [f"Method: {label}."]
-    if method == "quick_format_exfat":
+    target = erase.get("target") or run.get("erase_target")
+    if isinstance(target, dict) and target.get("path"):
+        lines.append(f"Volume: {_clean_line(target['path'], limit=100)}.")
+    if method in {"quick_format_exfat", "initialize_exfat"}:
         lines.append("Security: Not a secure erase; old files may be recoverable.")
     return lines
 
@@ -330,10 +335,14 @@ def run_message(run: dict, demo: bool = False, event: str | None = None) -> str:
             "extended": "SMART health, extended self-test, read speed, and a full read scan.",
             "verify": "A complete write, read-back verification, and final SMART health.",
             "quick_erase": "The confirmed quick erase method.",
+            "initialize_disk": "A partition-table reset and one new exFAT volume.",
             "secure_erase": "The drive's ATA firmware secure erase command.",
             "full_erase": "A complete overwrite with read-back verification.",
         }.get(str(run.get("profile")), "Drive health and read checks.")
         lines = [f"🔎 {profile} started{simulation}", "", *identity, "", f"Checking: {stage}"]
+        target = run.get("erase_target")
+        if isinstance(target, dict) and target.get("path"):
+            lines.append(f"Volume: {_clean_line(target['path'], limit=100)} only.")
         estimate = _started_estimate(run)
         if estimate:
             lines.append(estimate)

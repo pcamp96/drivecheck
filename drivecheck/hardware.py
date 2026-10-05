@@ -1060,8 +1060,25 @@ class Hardware:
                     "available": True,
                     "method": "quick_format_exfat",
                     "secure": False,
-                    "detail": "Demo quick erase creates a simulated empty exFAT volume.",
+                    "detail": "Demo quick format recreates the selected exFAT filesystem.",
                     "estimated_minutes": 1,
+                    "targets": [
+                        {
+                            "id": "demo-volume",
+                            "path": "/dev/demo1",
+                            "size_bytes": drive.size_bytes,
+                            "partuuid": "demo-partition",
+                            "filesystem": "exfat",
+                            "label": "DRIVECHECK",
+                        }
+                    ],
+                },
+                "initialize": {
+                    "available": True,
+                    "method": "initialize_exfat",
+                    "secure": False,
+                    "detail": "Demo disk initialization replaces the partition layout with one exFAT volume.",
+                    "estimated_minutes": 2,
                 },
                 "secure": {
                     "available": True,
@@ -1081,6 +1098,7 @@ class Hardware:
             detail = "ATA firmware erase recovery is required before another drive action."
             return {
                 "quick": self._unavailable_erase("quick_format_exfat", False, detail),
+                "initialize": self._unavailable_erase("initialize_exfat", False, detail),
                 "secure": self._unavailable_erase("ata_secure_erase", True, detail),
                 "full": self._unavailable_erase("full_overwrite", True, detail),
             }
@@ -1090,6 +1108,7 @@ class Hardware:
             detail = f"Drive is not safely erasable: {exc}"
             return {
                 "quick": self._unavailable_erase("quick_format_exfat", False, detail),
+                "initialize": self._unavailable_erase("initialize_exfat", False, detail),
                 "secure": self._unavailable_erase("ata_secure_erase", True, detail),
                 "full": self._unavailable_erase("full_overwrite", True, detail),
             }
@@ -1097,6 +1116,7 @@ class Hardware:
             detail = "Root privileges are required to erase a drive."
             return {
                 "quick": self._unavailable_erase("quick_format_exfat", False, detail),
+                "initialize": self._unavailable_erase("initialize_exfat", False, detail),
                 "secure": self._unavailable_erase("ata_secure_erase", True, detail),
                 "full": self._unavailable_erase("full_overwrite", True, detail),
             }
@@ -1112,9 +1132,10 @@ class Hardware:
                 else "fio is required for a full overwrite."
             ),
         }
-        quick = self._quick_format_plan()
+        quick = await self._quick_format_plan(current)
+        initialize = self._initialize_plan()
         secure = await self._secure_erase_plan(current)
-        return {"quick": quick, "secure": secure, "full": full}
+        return {"quick": quick, "initialize": initialize, "secure": secure, "full": full}
 
     async def erase(
         self,
@@ -1124,13 +1145,33 @@ class Hardware:
         *,
         recovery_dir: Path,
         expected_method: str | None = None,
+        target_id: str | None = None,
     ) -> dict[str, Any]:
-        if profile not in {"quick_erase", "secure_erase", "full_erase"}:
+        if profile not in {"quick_erase", "initialize_disk", "secure_erase", "full_erase"}:
             raise ValueError("unknown erase profile")
-        plan = await self.erase_plan(drive)
-        choice = plan[
-            {"quick_erase": "quick", "secure_erase": "secure", "full_erase": "full"}[profile]
-        ]
+        current = await self.validate(drive, destructive=True)
+        if self.demo:
+            choice = (await self.erase_plan(current))[
+                {
+                    "quick_erase": "quick",
+                    "initialize_disk": "initialize",
+                    "secure_erase": "secure",
+                    "full_erase": "full",
+                }[profile]
+            ]
+        elif profile == "quick_erase":
+            choice = await self._quick_format_plan(current)
+        elif profile == "initialize_disk":
+            choice = self._initialize_plan()
+        elif profile == "secure_erase":
+            choice = await self._secure_erase_plan(current)
+        else:
+            choice = {
+                "available": bool(shutil.which("fio")),
+                "method": "full_overwrite",
+                "secure": True,
+                "detail": "Writes and reads back the entire drive with SHA-256 verification.",
+            }
         if not choice["available"]:
             raise SafetyError(choice["detail"])
         method = choice["method"]
@@ -1144,6 +1185,8 @@ class Hardware:
         if profile == "full_erase":
             result = await self.surface(drive, progress, destructive=True)
             return {**result, "method": "full_overwrite"}
+        if profile == "initialize_disk":
+            return await self._initialize_exfat(drive, progress)
         if method == "ata_secure_erase":
             return await self._ata_secure_erase(
                 drive,
@@ -1151,7 +1194,7 @@ class Hardware:
                 recovery_dir=recovery_dir,
                 estimated_minutes=choice.get("estimated_minutes"),
             )
-        return await self._quick_format_exfat(drive, progress)
+        return await self._quick_format_exfat(drive, progress, target_id)
 
     async def _secure_erase_plan(self, drive: Drive) -> dict[str, Any]:
         if shutil.which("hdparm"):
@@ -1206,9 +1249,8 @@ class Hardware:
             "estimated_minutes": None,
         }
 
-    @staticmethod
-    def _quick_format_plan() -> dict[str, Any]:
-        required = ("wipefs", "sgdisk", "mkfs.exfat", "partprobe", "blkid", "lsblk")
+    async def _quick_format_plan(self, drive: Drive) -> dict[str, Any]:
+        required = ("mkfs.exfat", "blkid", "lsblk")
         missing = [name for name in required if not shutil.which(name)]
         if missing:
             return Hardware._unavailable_erase(
@@ -1216,11 +1258,40 @@ class Hardware:
                 False,
                 "Quick format requires: " + ", ".join(missing) + ".",
             )
+        targets = await self._format_targets(drive.path)
+        if not targets:
+            return {
+                **Hardware._unavailable_erase(
+                    "quick_format_exfat",
+                    False,
+                    "Quick format requires an existing unmounted partition. Use Initialize/reset disk to create a new layout.",
+                ),
+                "targets": [],
+            }
         return {
             "available": True,
             "method": "quick_format_exfat",
             "secure": False,
-            "detail": "Removes old signatures and creates one empty exFAT volume; old data is not securely overwritten.",
+            "detail": "Quick-formats one selected existing partition as exFAT without changing the partition table or other partitions.",
+            "estimated_minutes": 2,
+            "targets": targets,
+        }
+
+    @staticmethod
+    def _initialize_plan() -> dict[str, Any]:
+        required = ("wipefs", "sgdisk", "mkfs.exfat", "partprobe", "blkid", "lsblk")
+        missing = [name for name in required if not shutil.which(name)]
+        if missing:
+            return Hardware._unavailable_erase(
+                "initialize_exfat",
+                False,
+                "Disk initialization requires: " + ", ".join(missing) + ".",
+            )
+        return {
+            "available": True,
+            "method": "initialize_exfat",
+            "secure": False,
+            "detail": "Replaces the entire partition layout with one empty exFAT volume; old data is not securely overwritten.",
             "estimated_minutes": 2,
         }
 
@@ -1380,7 +1451,94 @@ class Hardware:
             "recovery_required": True,
         }
 
-    async def _quick_format_exfat(self, drive: Drive, progress: Progress) -> dict[str, Any]:
+    async def _quick_format_exfat(
+        self, drive: Drive, progress: Progress, target_id: str | None
+    ) -> dict[str, Any]:
+        current = await self.validate(drive, destructive=True)
+        device_number = self._pin_device(current.path)
+        try:
+            before = await self._format_targets(current.path)
+            target = next((item for item in before if item["id"] == target_id), None)
+            if target is None:
+                raise SafetyError("the selected quick-format volume is missing or changed")
+            topology = tuple(item["id"] for item in before)
+            target_device_number = self._pin_device(target["path"])
+            await self._erase_revalidate(current, device_number)
+            with self._exclusive_claim(current.path):
+                if (
+                    tuple(item["id"] for item in await self._format_targets(current.path))
+                    != topology
+                ):
+                    raise SafetyError("partition topology changed before quick format")
+
+            # mkfs.exfat performs a quick format by default and opens the selected
+            # partition exclusively. It recreates that volume's filesystem metadata
+            # without rewriting the disk's partition table or scanning every sector.
+            self._cancel_requested = False
+            task = asyncio.create_task(
+                self._runner.run(
+                    "mkfs.exfat", "-K", "-L", "DRIVECHECK", target["path"], timeout=60 * 60
+                )
+            )
+            safety_error: SafetyError | CommandError | None = None
+            try:
+                while not task.done():
+                    done, _ = await asyncio.wait({task}, timeout=self.io_safety_poll_seconds)
+                    if done:
+                        break
+                    try:
+                        await self._erase_revalidate(current, device_number)
+                        if self._pin_device(target["path"]) != target_device_number:
+                            raise SafetyError("quick-format volume block device changed")
+                        if (
+                            tuple(item["id"] for item in await self._format_targets(current.path))
+                            != topology
+                        ):
+                            raise SafetyError("partition topology changed during quick format")
+                        if self._cancel_requested:
+                            raise SafetyError("quick format cancellation was requested")
+                        await progress(90, f"Quick-formatting {target['path']} as exFAT")
+                    except (SafetyError, CommandError) as exc:
+                        safety_error = exc
+                        await self._runner.cancel()
+                        break
+                formatted = await task
+            except asyncio.CancelledError:
+                await self._runner.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise
+            if safety_error is not None:
+                raise safety_error
+            if formatted.returncode:
+                raise CommandError("mkfs.exfat could not quick-format the selected volume")
+            await self._erase_revalidate(current, device_number)
+            if self._pin_device(target["path"]) != target_device_number:
+                raise SafetyError("quick-format volume block device changed")
+            after = await self._format_targets(current.path)
+            if tuple(item["id"] for item in after) != topology:
+                raise SafetyError("partition topology changed after quick format")
+            verified = await self._runner.run("blkid", "-o", "export", target["path"], timeout=30)
+            fields = dict(
+                line.split("=", 1) for line in verified.stdout.splitlines() if "=" in line
+            )
+            if verified.returncode or fields.get("TYPE") != "exfat":
+                raise CommandError("the selected exFAT volume could not be verified")
+        except (CommandError, SafetyError) as exc:
+            return {
+                "status": "failed",
+                "method": "quick_format_exfat",
+                "target": target_id,
+                "detail": str(exc),
+            }
+        await progress(100, f"Quick exFAT format completed on {target['path']}")
+        return {
+            "status": "passed",
+            "method": "quick_format_exfat",
+            "target": target,
+            "detail": f"{target['path']} was quick-formatted as exFAT; the partition table and other volumes were preserved. Old file contents may remain recoverable.",
+        }
+
+    async def _initialize_exfat(self, drive: Drive, progress: Progress) -> dict[str, Any]:
         current = await self.validate(drive, destructive=True)
         device_number = self._pin_device(current.path)
         try:
@@ -1424,7 +1582,9 @@ class Hardware:
             # with EBUSY, so hand the claim directly to mkfs after one final
             # identity/topology check. If an automounter wins the tiny handoff
             # window, mkfs's exclusive open fails instead of formatting it.
-            formatted = await self._run_exfat_format(current, partition, device_number, progress)
+            formatted = await self._run_initialized_exfat_format(
+                current, partition, device_number, progress
+            )
             if formatted.returncode:
                 raise CommandError("mkfs.exfat could not create the volume")
             step += 1
@@ -1447,17 +1607,17 @@ class Hardware:
         except (CommandError, SafetyError) as exc:
             return {
                 "status": "failed",
-                "method": "quick_format_exfat",
+                "method": "initialize_exfat",
                 "detail": str(exc),
             }
-        await progress(100, "Quick exFAT format completed")
+        await progress(100, "Disk initialization completed")
         return {
             "status": "passed",
-            "method": "quick_format_exfat",
-            "detail": "Old signatures were removed and one quick-formatted exFAT volume was verified; old data was not securely overwritten.",
+            "method": "initialize_exfat",
+            "detail": "The partition layout was replaced with one quick-formatted exFAT volume; old data was not securely overwritten.",
         }
 
-    async def _run_exfat_format(
+    async def _run_initialized_exfat_format(
         self,
         drive: Drive,
         partition: str,
@@ -1505,6 +1665,70 @@ class Hardware:
         if self._pin_device(current.path) != device_number:
             raise SafetyError("block device number changed")
         return current
+
+    async def _format_targets(self, disk_path: str) -> list[dict[str, Any]]:
+        result = await self._discovery_runner.run(
+            "lsblk",
+            "--json",
+            "--bytes",
+            "--paths",
+            "--output",
+            "PATH,TYPE,PKNAME,SIZE,START,PARTUUID,PARTTYPE,MAJ:MIN,FSTYPE,LABEL,MOUNTPOINTS",
+            disk_path,
+            timeout=15,
+        )
+        if result.returncode:
+            raise CommandError("quick-format volume topology could not be read")
+        try:
+            nodes = json.loads(result.stdout).get("blockdevices", [])
+        except (AttributeError, json.JSONDecodeError) as exc:
+            raise CommandError("quick-format volume topology was invalid") from exc
+        if len(nodes) != 1 or _text(nodes[0].get("path")) != disk_path:
+            raise SafetyError("volume topology did not uniquely match the selected drive")
+        disk_name = Path(disk_path).name
+        targets: list[dict[str, Any]] = []
+        for child in nodes[0].get("children") or []:
+            path = _text(child.get("path"))
+            if (
+                _text(child.get("type")) != "part"
+                or Path(_text(child.get("pkname"))).name != disk_name
+                or not re.fullmatch(r"/dev/[A-Za-z0-9._+-]+", path)
+                or child.get("children")
+                or _mountpoints(child)
+            ):
+                raise SafetyError("partition topology is unsafe for quick format")
+            try:
+                size = int(child.get("size") or 0)
+                raw_start = child.get("start")
+                if raw_start is None or raw_start == "":
+                    raise ValueError("missing start offset")
+                start = int(raw_start)
+            except (TypeError, ValueError) as exc:
+                raise SafetyError("quick-format volume boundaries are invalid") from exc
+            if size <= 0 or start < 0:
+                raise SafetyError("quick-format volume boundaries are invalid")
+            partuuid = _text(child.get("partuuid"))
+            parttype = _text(child.get("parttype"))
+            major_minor = _text(child.get("maj:min"))
+            if not re.fullmatch(r"\d+:\d+", major_minor):
+                raise SafetyError("quick-format volume device number is invalid")
+            target_id = hashlib.sha256(
+                f"{path}\0{size}\0{start}\0{partuuid}\0{parttype}\0{major_minor}".encode()
+            ).hexdigest()[:24]
+            targets.append(
+                {
+                    "id": target_id,
+                    "path": path,
+                    "size_bytes": size,
+                    "start_offset": start,
+                    "partuuid": partuuid or None,
+                    "parttype": parttype or None,
+                    "device_number": major_minor,
+                    "filesystem": _text(child.get("fstype")) or None,
+                    "label": _text(child.get("label")) or None,
+                }
+            )
+        return sorted(targets, key=lambda item: item["path"])
 
     async def _erase_partitions(self, disk_path: str) -> tuple[str, ...]:
         result = await self._discovery_runner.run(

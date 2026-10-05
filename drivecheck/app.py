@@ -63,9 +63,12 @@ class SettingsInput(Input):
 
 
 class EraseInput(Input):
-    profile: Literal["quick_erase", "secure_erase", "full_erase"]
+    profile: Literal["quick_erase", "initialize_disk", "secure_erase", "full_erase"]
     confirmation: str = Field(max_length=300)
-    expected_method: Literal["ata_secure_erase", "quick_format_exfat", "full_overwrite"]
+    expected_method: Literal[
+        "ata_secure_erase", "quick_format_exfat", "initialize_exfat", "full_overwrite"
+    ]
+    target_id: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class TakeControlInput(Input):
@@ -283,7 +286,11 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
     async def erase_drive(drive_id: str, body: EraseInput):
         try:
             return await engine().request_erase(
-                drive_id, body.profile, body.confirmation, body.expected_method
+                drive_id,
+                body.profile,
+                body.confirmation,
+                body.expected_method,
+                target_id=body.target_id,
             )
         except (ValueError, SafetyError) as error:
             raise HTTPException(409, str(error)) from None

@@ -247,7 +247,10 @@ async def test_reconnected_new_path_can_confirm_erase_but_buttons_remain_one_use
         intent = await engine.begin_erase(nonce, "quick_erase", chat_id=42, user_id=42)
         assert engine.erase_intents[intent["intent_id"]]["drive"]["path"] == "/dev/new-path"
         result = await engine.confirm_erase(
-            intent["intent_id"], "QUICK ERASE " + hardware.current.serial, chat_id=42, user_id=42
+            intent["intent_id"],
+            "QUICK FORMAT " + hardware.current.serial + " /dev/demo1",
+            chat_id=42,
+            user_id=42,
         )
         assert result["status"] == "queued" and result["run"]["profile"] == "quick_erase"
         assert nonce not in engine.reconnect_contexts

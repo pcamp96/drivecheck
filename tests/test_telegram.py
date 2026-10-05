@@ -442,7 +442,9 @@ async def test_erase_buttons_only_create_intent_until_authorized_prompt_reply():
     settings = engine.settings.value["notifications"]
     signature = ("123:secret_token", "-100", "42")
 
-    for index, profile in enumerate(("quick_erase", "secure_erase", "full_erase"), 1):
+    for index, profile in enumerate(
+        ("quick_erase", "initialize_disk", "secure_erase", "full_erase"), 1
+    ):
         confirms_before = len(engine.erase_confirms)
         assert await interface._handle_update(
             "123:secret_token",
@@ -474,7 +476,8 @@ async def test_erase_buttons_only_create_intent_until_authorized_prompt_reply():
         assert "did not match exactly" in sent[-1]["text"]
 
         phrase = {
-            "quick_erase": "QUICK ERASE SERIAL",
+            "quick_erase": "QUICK FORMAT SERIAL /dev/demo1",
+            "initialize_disk": "INITIALIZE DISK SERIAL",
             "secure_erase": "SECURE ERASE SERIAL",
             "full_erase": "FULL ERASE SERIAL",
         }[profile]
@@ -491,6 +494,7 @@ async def test_erase_buttons_only_create_intent_until_authorized_prompt_reply():
 
     assert [call[1] for call in engine.erase_begins] == [
         "quick_erase",
+        "initialize_disk",
         "secure_erase",
         "full_erase",
     ]
@@ -584,7 +588,10 @@ async def test_settings_revocation_during_erase_begin_or_confirm_sends_no_stale_
 
     engine.confirm_erase = revoked_confirm
     assert not await interface._handle_update(
-        "123:secret_token", settings, reply(3, prompt_id, "QUICK ERASE SERIAL"), signature
+        "123:secret_token",
+        settings,
+        reply(3, prompt_id, "QUICK FORMAT SERIAL /dev/demo1"),
+        signature,
     )
     assert provider_calls == [] and interface._pending == {}
 

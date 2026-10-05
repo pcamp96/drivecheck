@@ -11,7 +11,7 @@ import httpx
 from drivecheck.hardware import SafetyError
 
 CALLBACK = re.compile(
-    r"dc:([0-9a-f]{32}):(quick|extended|eject|reconnect|erase|quick_erase|secure_erase|full_erase|cancel|cancel_info)\Z"
+    r"dc:([0-9a-f]{32}):(quick|extended|eject|reconnect|erase|quick_erase|initialize_disk|secure_erase|full_erase|cancel|cancel_info)\Z"
 )
 
 
@@ -319,7 +319,7 @@ class TelegramInterface:
                 acknowledgement,
                 alert=status in {"blocked", "needs_reconnect"},
             )
-        if action in {"quick_erase", "secure_erase", "full_erase"}:
+        if action in {"quick_erase", "initialize_disk", "secure_erase", "full_erase"}:
             try:
                 intent = await self.engine.begin_erase(
                     run_id, action, chat_id=actual_chat, user_id=actual_user

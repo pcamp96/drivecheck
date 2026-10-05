@@ -31,7 +31,23 @@ class EraseHardware(Hardware):
 
     async def erase_plan(self, drive):
         return {
-            "quick": {"available": True, "method": self.method, "detail": "Quick format"},
+            "quick": {
+                "available": True,
+                "method": self.method,
+                "detail": "Quick format",
+                "targets": [
+                    {
+                        "id": "volume-1",
+                        "path": "/dev/demo1",
+                        "size_bytes": drive.size_bytes,
+                    }
+                ],
+            },
+            "initialize": {
+                "available": True,
+                "method": "initialize_exfat",
+                "detail": "Initialize disk",
+            },
             "secure": {
                 "available": True,
                 "method": "ata_secure_erase",
@@ -41,7 +57,9 @@ class EraseHardware(Hardware):
             "full": {"available": True, "method": "full_overwrite", "detail": "Complete overwrite"},
         }
 
-    async def erase(self, drive, profile, progress, *, recovery_dir, expected_method):
+    async def erase(
+        self, drive, profile, progress, *, recovery_dir, expected_method, target_id=None
+    ):
         self.calls.append((profile, expected_method))
         self.entered.set()
         if self.hold:
@@ -80,6 +98,7 @@ def authorize(engine):
     "profile,method",
     [
         ("quick_erase", "quick_format_exfat"),
+        ("initialize_disk", "initialize_exfat"),
         ("secure_erase", "ata_secure_erase"),
         ("full_erase", "full_overwrite"),
     ],
@@ -88,17 +107,24 @@ async def test_erase_is_separate_manual_job_and_report_records_method(tmp_path, 
     engine, store = await make_engine(tmp_path)
     try:
         drive = engine.drives[0]
+        target = (
+            {"id": "volume-1", "path": "/dev/demo1", "size_bytes": drive.size_bytes}
+            if profile == "quick_erase"
+            else None
+        )
+        target_id = target["id"] if target else None
+        phrase = engine._erase_phrase(profile, drive.serial, target)
         with pytest.raises(ValueError, match="confirmation endpoint"):
             await engine.enqueue(drive.id, profile)
-        with pytest.raises(ValueError, match="exact"):
-            await engine.request_erase(drive.id, profile, "WRONG", method)
+        with pytest.raises(ValueError, match="exact|confirmation"):
+            await engine.request_erase(drive.id, profile, "WRONG", method, target_id=target_id)
         with pytest.raises(ValueError, match="method changed"):
             await engine.request_erase(
-                drive.id, profile, engine._erase_phrase(profile, drive.serial), "wrong_method"
+                drive.id, profile, phrase, "wrong_method", target_id=target_id
             )
         assert not store.runs() and not engine.hardware.calls
         response = await engine.request_erase(
-            drive.id, profile, engine._erase_phrase(profile, drive.serial), method
+            drive.id, profile, phrase, method, target_id=target_id
         )
         run = response["run"]
         assert not run["automatic"]
@@ -178,13 +204,19 @@ async def test_telegram_button_intent_requires_serial_and_is_one_use(tmp_path):
         with pytest.raises(ValueError, match="exactly"):
             await engine.confirm_erase(intent["intent_id"], "WRONG", chat_id=123, user_id=123)
         outcome = await engine.confirm_erase(
-            intent["intent_id"], f"QUICK ERASE {drive.serial}", chat_id=123, user_id=123
+            intent["intent_id"],
+            f"QUICK FORMAT {drive.serial} /dev/demo1",
+            chat_id=123,
+            user_id=123,
         )
         assert outcome["status"] == "accepted"
         assert wait["event"].is_set() and wait["choice"] == "quick_erase"
         with pytest.raises(ValueError, match="expired"):
             await engine.confirm_erase(
-                intent["intent_id"], f"QUICK ERASE {drive.serial}", chat_id=123, user_id=123
+                intent["intent_id"],
+                f"QUICK FORMAT {drive.serial} /dev/demo1",
+                chat_id=123,
+                user_id=123,
             )
         assert not engine.hardware.calls
     finally:
@@ -199,12 +231,50 @@ async def test_firmware_erase_confirmation_names_duration_and_cancellation_limit
         original = await engine.enqueue(drive.id, "quick")
         original.update(status="passed", workflow_status="complete")
         store.save(original)
-        intent = await engine.begin_erase(
-            original["id"], "secure_erase", chat_id=123, user_id=123
-        )
+        intent = await engine.begin_erase(original["id"], "secure_erase", chat_id=123, user_id=123)
         assert "Estimated duration: about 4h 0m." in intent["message"]
         assert "Cannot safely cancel once firmware erase starts." in intent["message"]
         assert f"SECURE ERASE {drive.serial}" in intent["message"]
+    finally:
+        store.close()
+
+
+async def test_telegram_quick_format_requires_one_volume_and_rejects_target_drift(tmp_path):
+    engine, store = await make_engine(tmp_path)
+    try:
+        authorize(engine)
+        drive = engine.drives[0]
+        original = await engine.enqueue(drive.id, "quick")
+        original.update(status="passed", workflow_status="complete")
+        store.save(original)
+
+        async def plan_with(targets):
+            return {
+                "quick": {
+                    "available": True,
+                    "method": "quick_format_exfat",
+                    "detail": "Selected-volume quick format",
+                    "targets": targets,
+                }
+            }
+
+        first = {"id": "volume-1", "path": "/dev/demo1", "size_bytes": 750_000_000}
+        second = {"id": "volume-2", "path": "/dev/demo2", "size_bytes": 250_000_000}
+        engine.hardware.erase_plan = lambda _drive: plan_with([first, second])
+        with pytest.raises(ValueError, match="dashboard"):
+            await engine.begin_erase(original["id"], "quick_erase", chat_id=123, user_id=123)
+
+        engine.hardware.erase_plan = lambda _drive: plan_with([first])
+        intent = await engine.begin_erase(original["id"], "quick_erase", chat_id=123, user_id=123)
+        engine.hardware.erase_plan = lambda _drive: plan_with([second])
+        with pytest.raises(ValueError, match="current quick-format volume"):
+            await engine.confirm_erase(
+                intent["intent_id"],
+                f"QUICK FORMAT {drive.serial} /dev/demo1",
+                chat_id=123,
+                user_id=123,
+            )
+        assert [run for run in store.runs() if run["profile"] == "quick_erase"] == []
     finally:
         store.close()
 
@@ -227,7 +297,10 @@ async def test_telegram_authority_rechecked_after_final_hardware_await(tmp_path)
         engine.hardware.on_validate = revoke_on_last_validate
         with pytest.raises(ValueError, match="authorization changed"):
             await engine.confirm_erase(
-                intent["intent_id"], f"QUICK ERASE {drive.serial}", chat_id=123, user_id=123
+                intent["intent_id"],
+                f"QUICK FORMAT {drive.serial} /dev/demo1",
+                chat_id=123,
+                user_id=123,
             )
         assert len(store.runs()) == 1 and not engine.hardware.calls
     finally:
@@ -309,7 +382,7 @@ async def test_queued_firmware_erase_captures_duration_and_null_progress(tmp_pat
                 }
             }
 
-        async def erase(drive, profile, progress, *, recovery_dir, expected_method):
+        async def erase(drive, profile, progress, *, recovery_dir, expected_method, target_id=None):
             await progress(None, "Firmware erase running; progress unavailable")
             current = store.runs()[0]
             assert current["progress"] is None and current["task"]["progress_percent"] is None
