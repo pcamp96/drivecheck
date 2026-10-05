@@ -63,7 +63,7 @@ class SettingsInput(Input):
 
 
 class EraseInput(Input):
-    profile: Literal["quick_erase", "full_erase"]
+    profile: Literal["quick_erase", "secure_erase", "full_erase"]
     confirmation: str = Field(max_length=300)
     expected_method: Literal["ata_secure_erase", "quick_format_exfat", "full_overwrite"]
 

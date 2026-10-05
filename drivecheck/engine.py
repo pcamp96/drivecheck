@@ -18,7 +18,12 @@ from drivecheck.storage import Store
 from drivecheck.telegram import TelegramInterface
 
 TERMINAL = {"passed", "warning", "failed", "incomplete", "cancelled"}
-ERASE_PROFILES = {"quick_erase", "full_erase"}
+ERASE_PROFILES = {"quick_erase", "secure_erase", "full_erase"}
+ERASE_PLAN_KEYS = {
+    "quick_erase": "quick",
+    "secure_erase": "secure",
+    "full_erase": "full",
+}
 PROFILES = {"quick", "extended", "verify", *ERASE_PROFILES}
 AUTO_DETACH_SCANS = 2
 BUSY_WORKFLOWS = {"finishing", "awaiting_action"}
@@ -364,7 +369,12 @@ class Engine:
         return await self.hardware.erase_plan(drive)
 
     def _erase_phrase(self, profile: str, serial: str) -> str:
-        return ("QUICK ERASE " if profile == "quick_erase" else "FULL ERASE ") + serial
+        prefix = {
+            "quick_erase": "QUICK ERASE ",
+            "secure_erase": "SECURE ERASE ",
+            "full_erase": "FULL ERASE ",
+        }[profile]
+        return prefix + serial
 
     def _telegram_authority(self, chat_id: int, user_id: int) -> str:
         notice = self.settings.value["notifications"]
@@ -394,7 +404,7 @@ class Engine:
         expected = context["drive"] if context else run["drive"]
         if drive is None or drive.path != expected["path"] or not drive.eligible:
             raise ValueError("The original drive is no longer available for erasing")
-        plan = (await self.erase_plan(drive.id))["quick" if profile == "quick_erase" else "full"]
+        plan = (await self.erase_plan(drive.id))[ERASE_PLAN_KEYS[profile]]
         if not plan.get("available"):
             raise ValueError(plan.get("detail", "This erase method is unavailable"))
         if authority != self._telegram_authority(chat_id, user_id):
@@ -435,6 +445,9 @@ class Engine:
             f"{drive.model}\nSerial: {drive.serial}\nCapacity: {drive.size_bytes / 1e12:.2f} TB\n\n"
             f"Method: {plan['detail']}\nAll data on this drive will be lost."
         )
+        minutes = timing.positive(plan.get("estimated_minutes"))
+        if minutes is not None:
+            message += f"\nEstimated duration: about {timing.duration(minutes * 60)}."
         if plan["method"] == "ata_secure_erase":
             message += "\nCannot safely cancel once firmware erase starts."
         if plan["method"] == "quick_format_exfat":
@@ -485,9 +498,7 @@ class Engine:
             if not drive.serial or confirmation != self._erase_phrase(profile, drive.serial):
                 raise ValueError("The erase phrase must match the exact drive serial")
             await self.hardware.validate(drive, destructive=True)
-            plan = (await self.hardware.erase_plan(drive))[
-                "quick" if profile == "quick_erase" else "full"
-            ]
+            plan = (await self.hardware.erase_plan(drive))[ERASE_PLAN_KEYS[profile]]
             if not plan.get("available") or plan.get("method") != expected_method:
                 raise ValueError(
                     "The erase method changed or is unavailable. Review a fresh confirmation."
@@ -594,11 +605,11 @@ class Engine:
         if self._recovery_pending(drive):
             raise SafetyError("This drive requires firmware erase recovery")
         if profile in ERASE_PROFILES:
-            allowed = (
-                {"ata_secure_erase", "quick_format_exfat"}
-                if profile == "quick_erase"
-                else {"full_overwrite"}
-            )
+            allowed = {
+                "quick_erase": {"quick_format_exfat"},
+                "secure_erase": {"ata_secure_erase"},
+                "full_erase": {"full_overwrite"},
+            }[profile]
             if (
                 not self.config.allow_destructive
                 or expected_method not in allowed
@@ -619,9 +630,7 @@ class Engine:
             drive, destructive=profile == "verify" or profile in ERASE_PROFILES
         )
         if profile in ERASE_PROFILES:
-            plan = (await self.hardware.erase_plan(drive))[
-                "quick" if profile == "quick_erase" else "full"
-            ]
+            plan = (await self.hardware.erase_plan(drive))[ERASE_PLAN_KEYS[profile]]
             if not plan.get("available") or plan.get("method") != expected_method:
                 raise ValueError("The erase method changed; review a fresh confirmation")
             estimate = timing.build_erase_estimate(drive, profile, plan)
@@ -1125,7 +1134,7 @@ class Engine:
                     if not self.config.allow_destructive or self._recovery_pending(drive):
                         raise SafetyError("Erase is disabled or firmware recovery is required")
                     plan = (await self.hardware.erase_plan(drive))[
-                        "quick" if run["profile"] == "quick_erase" else "full"
+                        ERASE_PLAN_KEYS[run["profile"]]
                     ]
                     if not plan.get("available") or plan.get("method") != run["erase_method"]:
                         raise SafetyError("Erase method changed; review a fresh confirmation")
@@ -1356,6 +1365,10 @@ class Engine:
             rows.append(
                 [
                     {"text": "Quick erase", "callback_data": f"dc:{run_id}:quick_erase"},
+                    {
+                        "text": "Firmware secure erase",
+                        "callback_data": f"dc:{run_id}:secure_erase",
+                    },
                     {"text": "Full erase", "callback_data": f"dc:{run_id}:full_erase"},
                 ]
             )

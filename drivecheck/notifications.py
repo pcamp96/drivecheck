@@ -171,6 +171,7 @@ def _profile_name(profile: object) -> str:
         "extended": "Extended test",
         "verify": "Full verification",
         "quick_erase": "Quick erase",
+        "secure_erase": "Firmware secure erase",
         "full_erase": "Full erase",
     }.get(str(profile), "Drive test")
 
@@ -329,6 +330,7 @@ def run_message(run: dict, demo: bool = False, event: str | None = None) -> str:
             "extended": "SMART health, extended self-test, read speed, and a full read scan.",
             "verify": "A complete write, read-back verification, and final SMART health.",
             "quick_erase": "The confirmed quick erase method.",
+            "secure_erase": "The drive's ATA firmware secure erase command.",
             "full_erase": "A complete overwrite with read-back verification.",
         }.get(str(run.get("profile")), "Drive health and read checks.")
         lines = [f"🔎 {profile} started{simulation}", "", *identity, "", f"Checking: {stage}"]

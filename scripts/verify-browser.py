@@ -300,7 +300,7 @@ def main():
                 erase_state["system"]["active_run_id"] = None
                 erase_plan_calls = []
                 erase_posts = []
-                erase_attempts = {"quick_erase": 0, "full_erase": 0}
+                erase_attempts = {"quick_erase": 0, "secure_erase": 0, "full_erase": 0}
 
                 erase_context = browser.new_context(viewport={"width": 1200, "height": 900})
                 erase_page = erase_context.new_page()
@@ -315,27 +315,23 @@ def main():
 
                 def erase_plan(route):
                     erase_plan_calls.append(True)
-                    quick = (
-                        {
-                            "available": True,
-                            "method": "ata_secure_erase",
-                            "secure": True,
-                            "detail": "Drive firmware supports Secure Erase.",
-                            "estimated_minutes": 4,
-                        }
-                        if len(erase_plan_calls) == 1
-                        else {
-                            "available": True,
-                            "method": "quick_format_exfat",
-                            "secure": False,
-                            "detail": "Firmware erase is unavailable; Quick Format is the fallback.",
-                            "estimated_minutes": 1,
-                        }
-                    )
                     route.fulfill(
                         status=200,
                         json={
-                            "quick": quick,
+                            "quick": {
+                                "available": True,
+                                "method": "quick_format_exfat",
+                                "secure": False,
+                                "detail": "Creates a new empty exFAT volume.",
+                                "estimated_minutes": 2,
+                            },
+                            "secure": {
+                                "available": True,
+                                "method": "ata_secure_erase",
+                                "secure": True,
+                                "detail": "Drive firmware supports Secure Erase.",
+                                "estimated_minutes": 240,
+                            },
                             "full": {
                                 "available": True,
                                 "method": "full_overwrite",
@@ -380,8 +376,9 @@ def main():
                 erase_state["settings"]["allow_destructive"] = True
                 erase_page.reload()
                 erase_page.get_by_role("button", name="Quick erase", exact=True).click()
+                expect(erase_page.locator("#erase-method")).to_contain_text("NOT SECURE")
                 expect(erase_page.locator("#erase-method")).to_contain_text(
-                    "ATA firmware Secure Erase"
+                    "old files may be recoverable"
                 )
                 erase_page.locator("#erase-confirmation").fill("QUICK ERASE wrong")
                 erase_page.locator("#erase-submit").click()
@@ -393,14 +390,28 @@ def main():
                 erase_page.locator("#erase-confirmation").fill("QUICK ERASE FIXTURE-ERASE-1")
                 erase_page.locator("#erase-submit").click()
                 expect(erase_page.locator("#erase-dialog")).to_be_hidden()
-                assert erase_posts[-1]["expected_method"] == "ata_secure_erase"
+                assert erase_posts[-1]["expected_method"] == "quick_format_exfat"
 
-                erase_page.get_by_role("button", name="Quick erase", exact=True).click()
-                expect(erase_page.locator("#erase-method")).to_contain_text("NOT SECURE")
+                erase_page.get_by_role(
+                    "button", name="Firmware secure erase", exact=True
+                ).click()
                 expect(erase_page.locator("#erase-method")).to_contain_text(
-                    "old files may be recoverable"
+                    "ATA firmware Secure Erase"
                 )
-                erase_page.locator("#erase-cancel").click()
+                expect(erase_page.locator("#erase-method")).to_contain_text(
+                    "Cannot safely cancel"
+                )
+                erase_page.locator("#erase-confirmation").fill(
+                    "SECURE ERASE FIXTURE-ERASE-1"
+                )
+                erase_page.locator("#erase-submit").click()
+                expect(erase_page.locator("#erase-error")).to_contain_text("method changed")
+                erase_page.locator("#erase-confirmation").fill(
+                    "SECURE ERASE FIXTURE-ERASE-1"
+                )
+                erase_page.locator("#erase-submit").click()
+                expect(erase_page.locator("#erase-dialog")).to_be_hidden()
+                assert erase_posts[-1]["expected_method"] == "ata_secure_erase"
 
                 erase_page.get_by_role("button", name="Full erase", exact=True).click()
                 expect(erase_page.locator("#erase-method")).to_contain_text("Complete overwrite")

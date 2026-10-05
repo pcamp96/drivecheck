@@ -134,7 +134,7 @@ def safe_hardware(monkeypatch: pytest.MonkeyPatch) -> Hardware:
 
 
 @pytest.mark.asyncio
-async def test_plan_prefers_ready_firmware_and_falls_back_only_if_unsupported(
+async def test_plan_keeps_quick_format_separate_from_optional_firmware_erase(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     hardware = safe_hardware(monkeypatch)
@@ -142,7 +142,9 @@ async def test_plan_prefers_ready_firmware_and_falls_back_only_if_unsupported(
     hardware._runner = Runner([response(READY)])
     hardware._probe_runner = hardware._runner
     plan = await hardware.erase_plan(drive())
-    assert plan["quick"] == {
+    assert plan["quick"]["method"] == "quick_format_exfat"
+    assert plan["quick"]["secure"] is False
+    assert plan["secure"] == {
         "available": True,
         "method": "ata_secure_erase",
         "secure": True,
@@ -152,12 +154,14 @@ async def test_plan_prefers_ready_firmware_and_falls_back_only_if_unsupported(
 
     hardware._runner = Runner([response(UNSUPPORTED)])
     hardware._probe_runner = hardware._runner
-    assert (await hardware.erase_plan(drive()))["quick"]["method"] == "quick_format_exfat"
+    unsupported = await hardware.erase_plan(drive())
+    assert unsupported["quick"]["method"] == "quick_format_exfat"
+    assert unsupported["secure"]["available"] is False
 
     frozen = READY.replace("not frozen", "frozen")
     hardware._runner = Runner([response(frozen)])
     hardware._probe_runner = hardware._runner
-    blocked = (await hardware.erase_plan(drive()))["quick"]
+    blocked = (await hardware.erase_plan(drive()))["secure"]
     assert blocked["available"] is False
     assert blocked["method"] == "ata_secure_erase"
 
@@ -168,8 +172,8 @@ async def test_expected_method_drift_stops_before_mutation(
 ) -> None:
     hardware = safe_hardware(monkeypatch)
     monkeypatch.setattr("drivecheck.hardware.shutil.which", lambda name: f"/usr/bin/{name}")
-    hardware._runner = Runner([response(UNSUPPORTED)])
-    hardware._probe_runner = hardware._runner
+    hardware._runner = Runner([])
+    hardware._probe_runner = Runner([response(READY)])
 
     async def progress(_percent: int, _detail: str) -> None:
         return None
@@ -182,7 +186,7 @@ async def test_expected_method_drift_stops_before_mutation(
             recovery_dir=tmp_path,
             expected_method="ata_secure_erase",
         )
-    assert len(hardware._runner.calls) == 1
+    assert not hardware._runner.calls
 
 
 @pytest.mark.asyncio
@@ -200,7 +204,7 @@ async def test_secure_erase_redacts_password_and_removes_verified_journal(
 
     result = await hardware.erase(
         drive(),
-        "quick_erase",
+        "secure_erase",
         progress,
         recovery_dir=tmp_path / "recovery",
         expected_method="ata_secure_erase",
@@ -232,7 +236,7 @@ async def test_secure_erase_failure_keeps_recovery_journal_and_blocks_eject(
     recovery = tmp_path / "recovery"
     result = await hardware.erase(
         drive(),
-        "quick_erase",
+        "secure_erase",
         progress,
         recovery_dir=recovery,
         expected_method="ata_secure_erase",
@@ -264,7 +268,7 @@ async def test_secure_erase_requires_disabled_and_unlocked_terminal_state(
 
     result = await hardware.erase(
         drive(),
-        "quick_erase",
+        "secure_erase",
         progress,
         recovery_dir=tmp_path / "recovery",
         expected_method="ata_secure_erase",
@@ -290,7 +294,7 @@ async def test_secure_erase_task_cancellation_propagates_with_recovery_state(
     task = asyncio.create_task(
         hardware.erase(
             drive(),
-            "quick_erase",
+            "secure_erase",
             progress,
             recovery_dir=tmp_path / "recovery",
             expected_method="ata_secure_erase",

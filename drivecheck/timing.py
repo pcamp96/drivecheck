@@ -14,7 +14,7 @@ LABELS = {
 
 
 def steps_for(profile: str) -> list[str]:
-    if profile in {"quick_erase", "full_erase"}:
+    if profile in {"quick_erase", "secure_erase", "full_erase"}:
         return ["erase"]
     steps = ["smart_before", "self_test", "benchmark"]
     if profile != "quick":
@@ -125,8 +125,11 @@ def build_erase_estimate(drive, profile, plan, *, clock=None) -> dict:
             "Full erase provisionally assumes 100 MB/s for writing and read-back verification plus a 25% allowance; ETA updates from actual I/O."
         )
     elif method == "quick_format_exfat":
+        minutes = positive(plan.get("estimated_minutes"))
+        seconds = minutes * 60 if minutes is not None else None
+        source = "quick-format operation allowance"
         notes.append(
-            "Quick format duration is unavailable; its percentage describes operation steps, not erased sectors."
+            "Quick format percentage describes operation steps, not erased sectors. Old file contents may remain recoverable."
         )
     return {
         "profile": profile,

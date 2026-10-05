@@ -284,7 +284,7 @@ def human_report(run: dict[str, Any], demo: bool = False) -> str:
 
     if run.get("steps"):
         expected = run["steps"]
-    if run.get("profile") in {"quick_erase", "full_erase"}:
+    if run.get("profile") in {"quick_erase", "secure_erase", "full_erase"}:
         expected = ["erase"]
     lines = ["DriveCheck Report", "=" * 17, f"VERDICT: {status}"]
     if demo:

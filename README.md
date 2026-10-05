@@ -160,9 +160,10 @@ If automatic intake already started, rescan reports that job rather than queuing
 
 Buttons only apply to the original, safely identified drive; expired,
 replayed, missing, mounted, or replaced drive actions are rejected. When manual
-erase is enabled, **Quick erase** and **Full erase** buttons open a confirmation
+erase is enabled, **Quick erase**, **Firmware secure erase**, and **Full erase** buttons open a confirmation
 prompt; pressing the button does not write to the drive. Reply to that exact
-prompt with `QUICK ERASE <exact serial>` or `FULL ERASE <exact serial>` within
+prompt with `QUICK ERASE <exact serial>`, `SECURE ERASE <exact serial>`, or
+`FULL ERASE <exact serial>` within
 120 seconds (or the remaining action window, whichever is shorter). Only the
 configured chat and authorized sender can confirm. The original eject countdown
 continues while the prompt is open. Discord only sends notifications.
@@ -192,7 +193,8 @@ Filesystem mounting cannot bring an ejected USB device back online. Quick runs t
 | Quick | SMART before/after, firmware short SMART self-test, and a 30-second sequential read sample | None |
 | Extended | SMART, extended drive self-test, read benchmark, full read scan, final SMART | None |
 | Write verification | Extended self-test, read benchmark, full-drive write and checksum readback, SMART before/after | **Entire selected drive overwritten** |
-| Quick erase (manual) | Supported ATA firmware secure erase; otherwise clearly identified quick-format fallback | **Existing data lost** |
+| Quick erase (manual) | Removes signatures and creates one empty exFAT volume; usually completes in minutes, but old contents may remain recoverable | **Filesystem and partition data lost** |
+| Firmware secure erase (manual) | Explicit ATA firmware Secure Erase when the drive and adapter support it; may take many hours and cannot safely be cancelled after it starts | **Entire selected drive erased** |
 | Full erase (manual) | Full accessible drive overwrite and SHA-256 checksum readback | **Entire selected drive overwritten** |
 
 Choose a drive on the dashboard and start Quick or Extended. Enable automatic
@@ -274,15 +276,15 @@ and queue read-only Quick intake. It preserves RAID metadata and existing file
 contents. Active/shared arrays and other holders remain blocked; DriveCheck
 never automatically takes control or removes RAID metadata.
 
-Quick erase detects ATA security support through the Linux drive/USB bridge.
-Firmware erase can still take hours despite the profile name. Frozen, locked,
-already security-enabled drives, ambiguous probe results, and failed firmware
-commands are blocked rather than silently formatted. If ATA security is explicitly
-unsupported (or `hdparm` is unavailable), the confirmation offers a GPT disk with
-one exFAT partition. This fallback is **not secure erasure**: old file contents can
-remain recoverable. The installer includes `hdparm`, `gdisk`, `exfatprogs`, `parted`,
-and `mdadm` along with the testing tools. macOS remains read-only; erase and RAID
-takeover are currently Linux-only.
+Quick erase always removes old signatures and creates a GPT disk with one empty
+exFAT partition. It is designed to finish in minutes and is **not secure erasure**:
+old file contents can remain recoverable. ATA firmware Secure Erase is a separate,
+explicit action with its estimated duration shown before confirmation. Frozen,
+locked, already security-enabled drives, ambiguous probes, unsupported adapters,
+and failed firmware commands block that action without changing Quick erase. The
+installer includes `hdparm`, `gdisk`, `exfatprogs`, `parted`, and `mdadm` along with
+the testing tools. macOS remains read-only; erase and RAID takeover are currently
+Linux-only.
 
 Firmware erase uses a temporary password with a protected recovery record under
 `<data directory>/erase-recovery/<drive identity>.json` (directory 0700, file 0600).

@@ -442,7 +442,7 @@ async def test_erase_buttons_only_create_intent_until_authorized_prompt_reply():
     settings = engine.settings.value["notifications"]
     signature = ("123:secret_token", "-100", "42")
 
-    for index, profile in enumerate(("quick_erase", "full_erase"), 1):
+    for index, profile in enumerate(("quick_erase", "secure_erase", "full_erase"), 1):
         confirms_before = len(engine.erase_confirms)
         assert await interface._handle_update(
             "123:secret_token",
@@ -473,7 +473,11 @@ async def test_erase_buttons_only_create_intent_until_authorized_prompt_reply():
         assert (-100, 42, prompt_id) in interface._pending
         assert "did not match exactly" in sent[-1]["text"]
 
-        phrase = "QUICK ERASE SERIAL" if profile == "quick_erase" else "FULL ERASE SERIAL"
+        phrase = {
+            "quick_erase": "QUICK ERASE SERIAL",
+            "secure_erase": "SECURE ERASE SERIAL",
+            "full_erase": "FULL ERASE SERIAL",
+        }[profile]
         assert await interface._handle_update(
             "123:secret_token", settings, reply(14, prompt_id, phrase), signature
         )
@@ -485,7 +489,11 @@ async def test_erase_buttons_only_create_intent_until_authorized_prompt_reply():
         )
         assert len(engine.erase_confirms) == confirms
 
-    assert [call[1] for call in engine.erase_begins] == ["quick_erase", "full_erase"]
+    assert [call[1] for call in engine.erase_begins] == [
+        "quick_erase",
+        "secure_erase",
+        "full_erase",
+    ]
 
 
 async def test_pending_erase_expires_replaces_older_sender_prompt_and_clears_on_settings_change(

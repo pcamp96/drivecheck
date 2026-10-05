@@ -1063,6 +1063,13 @@ class Hardware:
                     "detail": "Demo quick erase creates a simulated empty exFAT volume.",
                     "estimated_minutes": 1,
                 },
+                "secure": {
+                    "available": True,
+                    "method": "ata_secure_erase",
+                    "secure": True,
+                    "detail": "Demo firmware secure erase simulates the drive's secure erase command.",
+                    "estimated_minutes": 120,
+                },
                 "full": {
                     "available": True,
                     "method": "full_overwrite",
@@ -1073,7 +1080,8 @@ class Hardware:
         if self.firmware_erase_active:
             detail = "ATA firmware erase recovery is required before another drive action."
             return {
-                "quick": self._unavailable_erase("ata_secure_erase", True, detail),
+                "quick": self._unavailable_erase("quick_format_exfat", False, detail),
+                "secure": self._unavailable_erase("ata_secure_erase", True, detail),
                 "full": self._unavailable_erase("full_overwrite", True, detail),
             }
         try:
@@ -1082,12 +1090,14 @@ class Hardware:
             detail = f"Drive is not safely erasable: {exc}"
             return {
                 "quick": self._unavailable_erase("quick_format_exfat", False, detail),
+                "secure": self._unavailable_erase("ata_secure_erase", True, detail),
                 "full": self._unavailable_erase("full_overwrite", True, detail),
             }
         if not hasattr(os, "geteuid") or os.geteuid() != 0:
             detail = "Root privileges are required to erase a drive."
             return {
                 "quick": self._unavailable_erase("quick_format_exfat", False, detail),
+                "secure": self._unavailable_erase("ata_secure_erase", True, detail),
                 "full": self._unavailable_erase("full_overwrite", True, detail),
             }
 
@@ -1102,8 +1112,9 @@ class Hardware:
                 else "fio is required for a full overwrite."
             ),
         }
-        quick = await self._quick_erase_plan(current)
-        return {"quick": quick, "full": full}
+        quick = self._quick_format_plan()
+        secure = await self._secure_erase_plan(current)
+        return {"quick": quick, "secure": secure, "full": full}
 
     async def erase(
         self,
@@ -1114,10 +1125,12 @@ class Hardware:
         recovery_dir: Path,
         expected_method: str | None = None,
     ) -> dict[str, Any]:
-        if profile not in {"quick_erase", "full_erase"}:
+        if profile not in {"quick_erase", "secure_erase", "full_erase"}:
             raise ValueError("unknown erase profile")
         plan = await self.erase_plan(drive)
-        choice = plan["quick" if profile == "quick_erase" else "full"]
+        choice = plan[
+            {"quick_erase": "quick", "secure_erase": "secure", "full_erase": "full"}[profile]
+        ]
         if not choice["available"]:
             raise SafetyError(choice["detail"])
         method = choice["method"]
@@ -1140,7 +1153,7 @@ class Hardware:
             )
         return await self._quick_format_exfat(drive, progress)
 
-    async def _quick_erase_plan(self, drive: Drive) -> dict[str, Any]:
+    async def _secure_erase_plan(self, drive: Drive) -> dict[str, Any]:
         if shutil.which("hdparm"):
             try:
                 security = await self._ata_security(drive)
@@ -1177,7 +1190,11 @@ class Hardware:
                     True,
                     "ATA Secure Erase support could not be determined.",
                 )
-        return self._quick_format_plan()
+        return self._unavailable_erase(
+            "ata_secure_erase",
+            True,
+            "This drive or adapter does not report ATA Secure Erase support.",
+        )
 
     @staticmethod
     def _unavailable_erase(method: str, secure: bool, detail: str) -> dict[str, Any]:

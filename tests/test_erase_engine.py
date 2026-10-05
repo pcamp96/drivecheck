@@ -15,7 +15,7 @@ from drivecheck.storage import Store
 class EraseHardware(Hardware):
     def __init__(self):
         super().__init__(demo=True)
-        self.method = "ata_secure_erase"
+        self.method = "quick_format_exfat"
         self.calls = []
         self.entered = asyncio.Event()
         self.firmware_erase_active = False
@@ -31,7 +31,13 @@ class EraseHardware(Hardware):
 
     async def erase_plan(self, drive):
         return {
-            "quick": {"available": True, "method": self.method, "detail": "Firmware erase"},
+            "quick": {"available": True, "method": self.method, "detail": "Quick format"},
+            "secure": {
+                "available": True,
+                "method": "ata_secure_erase",
+                "detail": "Firmware erase",
+                "estimated_minutes": 240,
+            },
             "full": {"available": True, "method": "full_overwrite", "detail": "Complete overwrite"},
         }
 
@@ -71,7 +77,12 @@ def authorize(engine):
 
 
 @pytest.mark.parametrize(
-    "profile,method", [("quick_erase", "ata_secure_erase"), ("full_erase", "full_overwrite")]
+    "profile,method",
+    [
+        ("quick_erase", "quick_format_exfat"),
+        ("secure_erase", "ata_secure_erase"),
+        ("full_erase", "full_overwrite"),
+    ],
 )
 async def test_erase_is_separate_manual_job_and_report_records_method(tmp_path, profile, method):
     engine, store = await make_engine(tmp_path)
@@ -106,7 +117,7 @@ async def test_disabled_station_and_automatic_intake_cannot_write(tmp_path):
         drive = engine.drives[0]
         with pytest.raises(ValueError, match="disabled"):
             await engine.request_erase(
-                drive.id, "quick_erase", f"QUICK ERASE {drive.serial}", "ata_secure_erase"
+                drive.id, "secure_erase", f"SECURE ERASE {drive.serial}", "ata_secure_erase"
             )
         with pytest.raises(ValueError, match="read-only"):
             await engine.enqueue(drive.id, "full_erase", automatic=True)
@@ -125,7 +136,7 @@ async def test_firmware_cancellation_survives_restart_and_blocks_release(tmp_pat
         engine.settings.value["auto_eject"] = True
         engine.hardware.hold = True
         response = await engine.request_erase(
-            drive.id, "quick_erase", f"QUICK ERASE {drive.serial}", "ata_secure_erase"
+            drive.id, "secure_erase", f"SECURE ERASE {drive.serial}", "ata_secure_erase"
         )
         task = asyncio.create_task(engine.execute(response["run"]))
         await engine.hardware.entered.wait()
@@ -176,6 +187,24 @@ async def test_telegram_button_intent_requires_serial_and_is_one_use(tmp_path):
                 intent["intent_id"], f"QUICK ERASE {drive.serial}", chat_id=123, user_id=123
             )
         assert not engine.hardware.calls
+    finally:
+        store.close()
+
+
+async def test_firmware_erase_confirmation_names_duration_and_cancellation_limit(tmp_path):
+    engine, store = await make_engine(tmp_path)
+    try:
+        authorize(engine)
+        drive = engine.drives[0]
+        original = await engine.enqueue(drive.id, "quick")
+        original.update(status="passed", workflow_status="complete")
+        store.save(original)
+        intent = await engine.begin_erase(
+            original["id"], "secure_erase", chat_id=123, user_id=123
+        )
+        assert "Estimated duration: about 4h 0m." in intent["message"]
+        assert "Cannot safely cancel once firmware erase starts." in intent["message"]
+        assert f"SECURE ERASE {drive.serial}" in intent["message"]
     finally:
         store.close()
 
@@ -252,7 +281,7 @@ async def test_service_shutdown_does_not_hang_or_eject_armed_firmware(tmp_path):
         await engine.start()
         drive = engine.drives[0]
         response = await engine.request_erase(
-            drive.id, "quick_erase", f"QUICK ERASE {drive.serial}", "ata_secure_erase"
+            drive.id, "secure_erase", f"SECURE ERASE {drive.serial}", "ata_secure_erase"
         )
         await asyncio.wait_for(engine.hardware.entered.wait(), 1)
         await asyncio.wait_for(engine.stop(), 1)
@@ -273,7 +302,7 @@ async def test_queued_firmware_erase_captures_duration_and_null_progress(tmp_pat
             nonlocal plans
             plans += 1
             return {
-                "quick": {
+                "secure": {
                     "available": True,
                     "method": "ata_secure_erase",
                     "estimated_minutes": 120 if plans < 3 else 125,
@@ -296,7 +325,7 @@ async def test_queued_firmware_erase_captures_duration_and_null_progress(tmp_pat
         hardware.erase = erase
         drive = engine.drives[0]
         response = await engine.request_erase(
-            drive.id, "quick_erase", "QUICK ERASE " + drive.serial, "ata_secure_erase"
+            drive.id, "secure_erase", "SECURE ERASE " + drive.serial, "ata_secure_erase"
         )
         run = response["run"]
         assert run["estimate"]["total_seconds"] == 120 * 60
@@ -327,7 +356,7 @@ async def test_uncertain_firmware_erase_never_reports_completed_percentage(tmp_p
         engine.settings.value["auto_eject"] = True
         drive = engine.drives[0]
         result = await engine.request_erase(
-            drive.id, "quick_erase", "QUICK ERASE " + drive.serial, "ata_secure_erase"
+            drive.id, "secure_erase", "SECURE ERASE " + drive.serial, "ata_secure_erase"
         )
         await engine.execute(result["run"])
         final = store.get(result["run"]["id"])
@@ -344,7 +373,7 @@ async def test_firmware_cancel_is_rejected_without_stopping_active_task(tmp_path
     try:
         drive = engine.drives[0]
         response = await engine.request_erase(
-            drive.id, "quick_erase", f"QUICK ERASE {drive.serial}", "ata_secure_erase"
+            drive.id, "secure_erase", f"SECURE ERASE {drive.serial}", "ata_secure_erase"
         )
         run = response["run"]
         run["status"] = "running"
@@ -364,7 +393,7 @@ async def test_stale_cancel_preserves_release_window_and_queued_erase_can_cancel
     try:
         drive = engine.drives[0]
         response = await engine.request_erase(
-            drive.id, "quick_erase", f"QUICK ERASE {drive.serial}", "ata_secure_erase"
+            drive.id, "secure_erase", f"SECURE ERASE {drive.serial}", "ata_secure_erase"
         )
         run = response["run"]
         assert (await engine.cancel(run["id"], testing_only=True))["status"] == "cancelled"
@@ -386,8 +415,8 @@ async def test_stale_cancel_preserves_release_window_and_queued_erase_can_cancel
         ("quick", None, "running", "Cancel test", "cancel"),
         ("full_erase", "full_overwrite", "running", "Cancel erase", "cancel"),
         ("quick_erase", "quick_format", "running", "Cancel erase", "cancel"),
-        ("quick_erase", "ata_secure_erase", "queued", "Cancel erase", "cancel"),
-        ("quick_erase", "ata_secure_erase", "running", "Why can't I cancel?", "cancel_info"),
+        ("secure_erase", "ata_secure_erase", "queued", "Cancel erase", "cancel"),
+        ("secure_erase", "ata_secure_erase", "running", "Why can't I cancel?", "cancel_info"),
     ],
 )
 async def test_started_telegram_controls_match_actual_cancellation_support(

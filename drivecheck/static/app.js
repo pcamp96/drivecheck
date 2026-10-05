@@ -276,7 +276,7 @@ function renderActive() {
   elements.activeEmpty.hidden = Boolean(run);
   elements.activeContent.hidden = !run;
   const firmwareCancelBlocked = firmwareErase && run?.status === "running";
-  const destructive = ["quick_erase", "full_erase", "verify"].includes(run?.profile);
+  const destructive = ["quick_erase", "secure_erase", "full_erase", "verify"].includes(run?.profile);
   elements.cancelButton.hidden = !run || awaiting;
   elements.cancelButton.disabled = firmwareCancelBlocked;
   elements.cancelButton.textContent = destructive ? "Cancel erase" : "Cancel test";
@@ -327,7 +327,7 @@ function renderActive() {
     : ["smart_before", "benchmark", "smart_after"];
   const runPhases = Array.isArray(run.steps) && run.steps.length
     ? run.steps
-    : ["quick_erase", "full_erase"].includes(run.profile)
+    : ["quick_erase", "secure_erase", "full_erase"].includes(run.profile)
     ? ["erase"]
     : run.profile === "quick"
       ? fallbackQuickPhases
@@ -503,6 +503,7 @@ function renderDrives() {
     if (drive.eligible && capabilities.can_erase !== false) {
       actions.append(
         eraseButton("Quick erase", drive, "quick_erase", busy && !awaitingThisDrive),
+        eraseButton("Firmware secure erase", drive, "secure_erase", busy && !awaitingThisDrive),
         eraseButton("Full erase", drive, "full_erase", busy && !awaitingThisDrive)
       );
     }
@@ -510,7 +511,7 @@ function renderDrives() {
     if (!drive.mounted && drive.eligible && capabilities.can_eject) actions.append(releaseButton("Eject drive", drive, "eject", busy));
     if (!drive.eligible && drive.ownership?.take_control_available) actions.append(takeControlButton(drive, busy));
     const eraseAvailability = !snapshot.settings?.allow_destructive && drive.eligible && capabilities.can_erase !== false
-      ? " Quick erase and Full erase are disabled by the station’s destructive-operation setting."
+      ? " Erase actions are disabled by the station’s destructive-operation setting."
       : "";
     const help = textNode("p", `Quick: SMART snapshots + a short drive self-test + read benchmark. Extended: runs the long self-test + full read scan. Erase + verify: destructive full-drive write/read checks.${eraseAvailability}`, "profile-help");
     card.append(main, capacity, connection, state, actions);
@@ -606,7 +607,7 @@ function releaseButton(label, drive, action, busy) {
 }
 
 function profileLabel(profile) {
-  return ({ quick: "Quick", extended: "Extended", verify: "Erase + verify", quick_erase: "Quick erase", full_erase: "Full erase" })[profile] || profile || "Unknown";
+  return ({ quick: "Quick", extended: "Extended", verify: "Erase + verify", quick_erase: "Quick erase", secure_erase: "Firmware secure erase", full_erase: "Full erase" })[profile] || profile || "Unknown";
 }
 
 function statusLabel(status) {
@@ -1241,9 +1242,14 @@ async function openErase(drive, profile) {
     method: null
   });
   eraseRequest = request;
-  const quick = profile === "quick_erase";
-  const phrase = `${quick ? "QUICK ERASE" : "FULL ERASE"} ${request.serial}`;
-  elements.eraseTitle.textContent = quick ? "Quick erase this drive?" : "Fully erase this drive?";
+  const choices = {
+    quick_erase: { key: "quick", phrase: "QUICK ERASE", title: "Quick erase this drive?", button: "Quick erase" },
+    secure_erase: { key: "secure", phrase: "SECURE ERASE", title: "Securely erase this drive using its firmware?", button: "Firmware secure erase" },
+    full_erase: { key: "full", phrase: "FULL ERASE", title: "Fully erase this drive?", button: "Full erase" }
+  };
+  const choice = choices[profile];
+  const phrase = `${choice.phrase} ${request.serial}`;
+  elements.eraseTitle.textContent = choice.title;
   elements.eraseDrive.textContent = `${request.model} · ${request.serial || "Serial unavailable"} · ${formatBytes(request.size_bytes)}`;
   elements.erasePhrase.textContent = phrase;
   elements.eraseConfirmation.value = "";
@@ -1251,7 +1257,7 @@ async function openErase(drive, profile) {
   elements.eraseMethod.className = "erase-method";
   elements.eraseMethod.textContent = "Checking the available erase method…";
   elements.eraseSubmit.disabled = true;
-  elements.eraseSubmit.textContent = quick ? "Quick erase" : "Full erase";
+  elements.eraseSubmit.textContent = choice.button;
   elements.eraseDialog.showModal();
   updateEraseDeadline();
   window.clearInterval(eraseDeadlineTimer);
@@ -1259,7 +1265,7 @@ async function openErase(drive, profile) {
   try {
     const plan = await api(`/api/drives/${encodeURIComponent(request.id)}/erase-plan`);
     if (eraseRequest !== request) return;
-    const option = quick ? plan.quick : plan.full;
+    const option = plan[choice.key];
     if (!option?.available || !option.method) {
       elements.eraseMethod.textContent = option?.detail || "This erase method is not available for the drive.";
       elements.eraseError.textContent = "Erase is unavailable.";
@@ -1459,7 +1465,7 @@ elements.eraseForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!eraseRequest?.method) return;
   const request = eraseRequest;
-  const phrase = `${request.profile === "quick_erase" ? "QUICK ERASE" : "FULL ERASE"} ${request.serial}`;
+  const phrase = `${({ quick_erase: "QUICK ERASE", secure_erase: "SECURE ERASE", full_erase: "FULL ERASE" })[request.profile]} ${request.serial}`;
   if (elements.eraseConfirmation.value !== phrase) {
     elements.eraseError.textContent = `Enter “${phrase}” exactly.`;
     elements.eraseConfirmation.focus();

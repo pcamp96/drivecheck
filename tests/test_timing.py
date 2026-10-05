@@ -214,12 +214,13 @@ def test_full_erase_eta_refines_from_verified_byte_progress():
     assert timing.live_timing(run, clock=CLOCK)["remaining_seconds"] is None
 
 
-def test_quick_format_does_not_borrow_firmware_erase_or_full_overwrite_duration():
+def test_quick_format_uses_its_explicit_operation_estimate():
     value = timing.build_erase_estimate(
         DRIVE,
         "quick_erase",
         {"method": "quick_format_exfat", "estimated_minutes": 120},
         clock=CLOCK,
     )
-    assert value["total_seconds"] is None
+    assert value["total_seconds"] == 120 * 60
+    assert value["estimated_finish_at"] == (CLOCK + timedelta(minutes=120)).isoformat()
     assert "operation steps" in " ".join(value["notes"])
