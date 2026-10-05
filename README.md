@@ -7,6 +7,8 @@ and receive confirmation when it is safe to remove.
 DriveCheck runs locally, with a live web dashboard and saved reports. No Docker,
 cloud service, or frontend build is required.
 
+![DriveCheck dashboard showing a Quick drive test, live progress, timing estimates, and connected drives](docs/images/drivecheck-dashboard.png)
+
 ## Features
 
 - **Quick testing:** SMART health, a short drive self-test, and a read benchmark.
