@@ -4,7 +4,7 @@ After=network.target udisks2.service
 Wants=udisks2.service
 
 [Service]
-Type=simple
+Type=exec
 User=root
 WorkingDirectory=/opt/drivecheck
 Environment="PATH=/opt/drivecheck/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

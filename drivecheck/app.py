@@ -3,6 +3,7 @@
 import asyncio
 import fcntl
 import json
+import os
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -198,7 +199,7 @@ def create_app(config: Config | None = None, hardware=None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "mode": "demo" if config.demo else "hardware", "version": "0.1.0"}
+        return {"status": "ok", "mode": "demo" if config.demo else "hardware", "version": "0.1.0", "pid": os.getpid()}
 
     @app.post("/api/login")
     async def login(body: Login, request: Request):

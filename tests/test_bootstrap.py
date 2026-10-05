@@ -20,7 +20,18 @@ def environment(tmp_path, platform="Linux"):
     env = fixture_environment(tmp_path)
     commands = tmp_path / "commands"
     real_python = shlex.quote(sys.executable)
-    command(commands / "python3", f'''if [ "$1" = -m ] && [ "$2" = venv ]; then
+    command(commands / "python3", f'''case "$1" in
+  */wait-ready.py)
+    echo "startup probe $*" >> "{tmp_path}/commands.log"
+    if [ "${{FAIL_READINESS:-}}" = 1 ]; then
+      echo "DriveCheck startup verification failed. Logs: sudo journalctl -u drivecheck -n 60 --no-pager"
+      exit 1
+    fi
+    echo "Dashboard ready: http://127.0.0.1:8765"
+    exit 0
+    ;;
+esac
+if [ "$1" = -m ] && [ "$2" = venv ]; then
   mkdir -p "$3/bin"
   printf '#!/bin/sh\\nexit 0\\n' > "$3/bin/pip"
   chmod +x "$3/bin/pip"
@@ -41,7 +52,7 @@ exit 0''')
     with zipfile.ZipFile(archive, "w") as output:
         files = [ROOT / name for name in (
             "scripts/install-linux.sh", "scripts/uninstall-linux.sh", "scripts/install-macos.sh",
-            "scripts/uninstall-macos.sh", "scripts/check-idle.py", "deploy/drivecheck.service",
+            "scripts/uninstall-macos.sh", "scripts/check-idle.py", "scripts/wait-ready.py", "deploy/drivecheck.service",
             "deploy/run-macos.sh", "pyproject.toml", "requirements.lock", ".env.example",
             "LICENSE", "README.md", "drivecheck/__init__.py",
         )]
@@ -216,3 +227,31 @@ def test_macos_unmanaged_paths_and_marker_symlink_are_preserved(tmp_path):
         result = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
         assert result.returncode != 0
         assert (app / "README.md").exists()
+
+
+@pytest.mark.parametrize("platform", ["Linux", "Darwin"])
+def test_installer_only_reports_success_after_readiness_probe(tmp_path, platform):
+    env = environment(tmp_path, platform)
+    env["FAIL_READINESS"] = "1"
+    result = bootstrap(env)
+    assert result.returncode != 0
+    assert "startup verification failed" in result.stderr
+    assert "DriveCheck installed on" not in result.stdout
+    assert "Installed revision:" not in result.stdout
+    root = Path(env["DRIVECHECK_TEST_ROOT"])
+    assert (root / "etc/drivecheck/drivecheck.env").is_file()
+    assert (root / "usr/local/sbin/drivecheck-uninstall").is_file()
+    env.pop("FAIL_READINESS")
+    result = bootstrap(env)
+    assert result.returncode == 0, result.stderr
+    assert "Dashboard ready" in result.stdout
+
+
+@pytest.mark.parametrize("platform", ["Linux", "Darwin"])
+def test_no_start_does_not_offer_a_token_before_startup(tmp_path, platform):
+    env = environment(tmp_path, platform)
+    result = bootstrap(env, "--no-start")
+    assert result.returncode == 0, result.stderr
+    assert "generated on first startup" in result.stdout
+    assert "Sign-in token: sudo cat" not in result.stdout
+    assert "startup probe" not in (tmp_path / "commands.log").read_text()

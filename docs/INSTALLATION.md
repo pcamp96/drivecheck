@@ -27,6 +27,10 @@ Configuration lives in `/etc/drivecheck/drivecheck.env`; private settings,
 reports, and the sign-in token live in `/var/lib/drivecheck`.
 Rerunning the installer preserves these files and refuses to interrupt queued
 or active tests and pending safe release.
+The installer waits for the service, dashboard, and sign-in credentials before
+reporting success. A failed startup exits with status/journal commands instead.
+With `--no-start`, the generated token will not exist until the first startup.
+If `DRIVECHECK_API_KEY` is configured, use that key; a token file is not generated.
 
 Installer options:
 
@@ -54,6 +58,14 @@ that connection; use SSH forwarding or HTTPS on shared/untrusted networks. Do
 not forward the service port to the internet. For a TLS reverse proxy set
 `DRIVECHECK_PUBLIC_ORIGIN` to its exact HTTPS origin and
 `DRIVECHECK_SECURE_COOKIE=true`; the app does not trust forwarded headers.
+
+If the browser is on the station itself, open the loopback URL directly; no SSH
+tunnel is needed. Otherwise run the tunnel on the computer with the browser.
+An SSH host-key mismatch is separate from DriveCheck. Check the station's key
+fingerprint at its trusted console with
+`sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`. Once verified, remove the
+old entry on the client with `ssh-keygen -R YOUR_PI` and reconnect.
+See the [OpenSSH key-management manual](https://man.openbsd.net/ssh-keygen.1).
 
 ## Install on macOS
 

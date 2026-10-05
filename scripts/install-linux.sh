@@ -200,16 +200,25 @@ chmod 600 "$manifest"
 
 systemctl enable drivecheck.service
 if [[ "$start_service" == true ]]; then
-  systemctl start drivecheck.service
+  if ! systemctl start drivecheck.service; then
+    echo 'DriveCheck startup failed. Check: sudo journalctl -u drivecheck -n 60 --no-pager' >&2
+    exit 1
+  fi
+  if ! ready_output=$(python3 "$source_dir/scripts/wait-ready.py" "$config_dir/drivecheck.env" --platform linux); then
+    printf '%s\n' "$ready_output" >&2
+    exit 1
+  fi
 fi
 
 printf '\nDriveCheck installed on Linux.\n'
 if [[ "$start_service" == true ]]; then
+  printf '%s\n' "$ready_output"
   printf 'Status: sudo systemctl status drivecheck\n'
 else
   printf 'Service left stopped (--no-start). Edit /etc/drivecheck/drivecheck.env, then run:\n'
   printf '  sudo systemctl start drivecheck\n'
+  printf 'The sign-in token is generated on first startup, unless DRIVECHECK_API_KEY is configured.\n'
 fi
-printf 'Sign-in token: sudo cat /var/lib/drivecheck/access-token\n'
-printf 'Dashboard tunnel: ssh -L 8765:127.0.0.1:8765 USER@HOST\n'
+printf 'From a separate computer, open an SSH tunnel to the station (default port):\n'
+printf '  ssh -N -L 8765:127.0.0.1:8765 USER@HOST\n'
 printf 'Uninstall later: sudo drivecheck-uninstall [--purge-data]\n'

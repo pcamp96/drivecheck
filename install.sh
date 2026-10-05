@@ -138,6 +138,7 @@ root = target / f"drivecheck-{revision}"
 for required in (
     "scripts/install-linux.sh", "scripts/uninstall-linux.sh", "deploy/drivecheck.service",
     "scripts/install-macos.sh", "scripts/uninstall-macos.sh", "scripts/check-idle.py",
+    "scripts/wait-ready.py",
     "deploy/run-macos.sh",
     "drivecheck/__init__.py", "pyproject.toml", "requirements.lock", ".env.example",
     "LICENSE", "README.md",

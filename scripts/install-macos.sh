@@ -145,12 +145,18 @@ fi
 launchctl enable system/org.drivecheck.station
 if [[ "$start_service" == true ]]; then
   launchctl bootstrap system "$unit_path"
+  if ! ready_output=$("$python_path" "$source_dir/scripts/wait-ready.py" "$config_dir/drivecheck.env" --platform macos); then
+    printf '%s\n' "$ready_output" >&2
+    exit 1
+  fi
 fi
 printf '\nDriveCheck installed on macOS (native testing, formatting, and overwrite).\n'
-printf 'Dashboard: http://127.0.0.1:8765\n'
-printf 'Sign-in token: sudo cat /var/db/drivecheck/access-token\n'
+if [[ "$start_service" == true ]]; then
+  printf '%s\n' "$ready_output"
+fi
 printf 'Status: sudo launchctl print system/org.drivecheck.station\n'
 if [[ "$start_service" == false ]]; then
   printf 'Service left stopped. Start: sudo launchctl bootstrap system /Library/LaunchDaemons/org.drivecheck.station.plist\n'
+  printf 'The sign-in token is generated on first startup, unless DRIVECHECK_API_KEY is configured.\n'
 fi
 printf 'Uninstall later: sudo /usr/local/sbin/drivecheck-uninstall [--purge-data]\n'
